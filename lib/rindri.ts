@@ -33,7 +33,7 @@ export function createRindriClient(): OpenAI {
   return new OpenAI({
     apiKey: apiKey || 'dummy-key-for-client-init',
     baseURL,
-    timeout: 60000,
+    timeout: 180000,
   });
 }
 

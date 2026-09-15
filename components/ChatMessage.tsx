@@ -17,6 +17,8 @@ import {
   Image as ImageIcon,
   X,
   Eye,
+  Brain,
+  ChevronDown,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, FileAttachment } from '@/types/chat';
 import { getModelInfo } from '@/lib/models';
@@ -87,6 +89,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   const isUser = message.role === 'user';
   const [copiedMessage, setCopiedMessage] = useState(false);
   const [previewAttachment, setPreviewAttachment] = useState<FileAttachment | null>(null);
+  const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
 
   const handleCopyMessage = async () => {
     try {
@@ -273,6 +276,32 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               </span>
             )}
           </div>
+
+          {/* Collapsible Thinking / Reasoning Process */}
+          {message.reasoning && (
+            <div className="mb-3 rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden text-xs">
+              <button
+                type="button"
+                onClick={() => setIsThinkingExpanded(!isThinkingExpanded)}
+                className="w-full flex items-center justify-between px-3.5 py-2 bg-white/[0.02] hover:bg-white/[0.05] text-indigo-300 font-medium cursor-pointer transition-colors"
+              >
+                <span className="flex items-center gap-2">
+                  <Brain className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Thinking Process</span>
+                </span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
+                    isThinkingExpanded ? 'rotate-180' : ''
+                  }`}
+                />
+              </button>
+              {isThinkingExpanded && (
+                <div className="p-3.5 border-t border-white/[0.06] text-slate-300 font-mono text-[11px] leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto bg-black/20">
+                  {message.reasoning}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="markdown-body text-sm text-slate-200 leading-relaxed break-words">
             <ReactMarkdown

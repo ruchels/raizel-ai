@@ -4,6 +4,7 @@ import { createRindriClient, getRindriApiKey, mapProviderError } from '@/lib/rin
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 300; // Allow up to 5 minutes for long generations (e.g. games, projects)
 
 export async function POST(req: NextRequest) {
   try {
@@ -110,31 +111,67 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // High-performance System Instructions for RAIZEL AI
+    const systemInstruction = {
+      role: 'system',
+      content: `You are RAIZEL AI, a premier, highly responsive, and elite AI engineering assistant.
+CRITICAL INSTRUCTIONS:
+- When asked to build large projects (such as 3D Python games, full-stack applications, complex simulations, scripts, or architectural systems), provide 100% complete, fully working, production-ready code with all required imports, game loop/logic, asset generation/fallbacks, and concise run instructions.
+- NEVER abbreviate, summarize code blocks with "# ... implement later", or stop halfway.
+- When provided with attachments (images, code files, or zip archives), thoroughly inspect and analyze the full content.
+- Start outputting your response immediately without unnecessary delay or fluff.`,
+    };
+
+    const messagesPayload = [systemInstruction, ...formattedMessages];
     const client = createRindriClient();
 
     if (stream) {
       try {
         const streamResponse = await client.chat.completions.create({
           model,
-          messages: formattedMessages,
+          messages: messagesPayload,
           stream: true,
+          max_tokens: 8192,
         });
 
         const encoder = new TextEncoder();
         const readableStream = new ReadableStream({
           async start(controller) {
+            // Send initial keep-alive comment
+            controller.enqueue(encoder.encode(': connected\n\n'));
+
+            // Heartbeat to keep proxies/gateways from timing out while generating
+            const pingTimer = setInterval(() => {
+              try {
+                controller.enqueue(encoder.encode(': ping\n\n'));
+              } catch {
+                clearInterval(pingTimer);
+              }
+            }, 3500);
+
             try {
               for await (const chunk of streamResponse) {
-                const text = chunk.choices?.[0]?.delta?.content || '';
-                if (text) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const delta = chunk.choices?.[0]?.delta as any;
+                const text = delta?.content || '';
+                const reasoning = delta?.reasoning_content || delta?.thinking || '';
+
+                if (text || reasoning) {
                   controller.enqueue(
-                    encoder.encode(`data: ${JSON.stringify({ delta: text })}\n\n`)
+                    encoder.encode(
+                      `data: ${JSON.stringify({
+                        delta: text,
+                        reasoning: reasoning,
+                      })}\n\n`
+                    )
                   );
                 }
               }
               controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              clearInterval(pingTimer);
               controller.close();
             } catch (streamError) {
+              clearInterval(pingTimer);
               const mapped = mapProviderError(streamError);
               controller.enqueue(
                 encoder.encode(
@@ -165,8 +202,9 @@ export async function POST(req: NextRequest) {
       try {
         const completion = await client.chat.completions.create({
           model,
-          messages: formattedMessages,
+          messages: messagesPayload,
           stream: false,
+          max_tokens: 8192,
         });
 
         const content =

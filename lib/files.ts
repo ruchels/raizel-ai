@@ -86,7 +86,7 @@ export async function processUploadedFile(file: File): Promise<FileAttachment> {
       const fileNames: string[] = [];
       const extractedSnippets: string[] = [];
       let totalExtractedSize = 0;
-      const MAX_TOTAL_SIZE = 500 * 1024; // 500 KB limit for extracted text inside prompt
+      const MAX_TOTAL_SIZE = 2 * 1024 * 1024; // 2 MB limit for extracted text inside prompt
 
       // Read files in zip
       const entries = Object.keys(zip.files);
@@ -102,7 +102,7 @@ export async function processUploadedFile(file: File): Promise<FileAttachment> {
               if (textContent.length > 0 && totalExtractedSize + textContent.length <= MAX_TOTAL_SIZE) {
                 totalExtractedSize += textContent.length;
                 extractedSnippets.push(
-                  `--- File: ${relativePath} ---\n${textContent.slice(0, 15000)}`
+                  `--- File: ${relativePath} (${textContent.split('\n').length} lines) ---\n${textContent.slice(0, 80000)}`
                 );
               }
             } catch {

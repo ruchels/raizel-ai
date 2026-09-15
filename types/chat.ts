@@ -20,6 +20,7 @@ export interface ChatMessage {
   model?: string;
   isError?: boolean;
   attachments?: FileAttachment[];
+  reasoning?: string;
 }
 
 export interface Conversation {

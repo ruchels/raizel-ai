@@ -262,6 +262,7 @@ export default function Home() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let accumulatedText = '';
+        let accumulatedReasoning = '';
         let buffer = '';
 
         while (true) {
@@ -284,11 +285,23 @@ export default function Home() {
                 if (parsed.error) {
                   throw new Error(parsed.error);
                 }
-                if (parsed.delta) {
-                  if (accumulatedText.length === 0) {
-                    setIsThinking(false);
-                  }
+
+                const hasNewContent = Boolean(parsed.delta);
+                const hasNewReasoning = Boolean(parsed.reasoning);
+
+                if (hasNewContent || hasNewReasoning) {
+                  setIsThinking(false);
+                }
+
+                if (hasNewReasoning) {
+                  accumulatedReasoning += parsed.reasoning;
+                }
+
+                if (hasNewContent) {
                   accumulatedText += parsed.delta;
+                }
+
+                if (hasNewContent || hasNewReasoning) {
                   setConversations((prev) =>
                     prev.map((c) =>
                       c.id === convId
@@ -296,7 +309,11 @@ export default function Home() {
                             ...c,
                             messages: c.messages.map((m) =>
                               m.id === assistantMessageId
-                                ? { ...m, content: accumulatedText }
+                                ? {
+                                    ...m,
+                                    content: accumulatedText,
+                                    reasoning: accumulatedReasoning || undefined,
+                                  }
                                 : m
                             ),
                           }
