@@ -357,45 +357,64 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
           )}
 
           <div className="markdown-body text-sm text-slate-200 leading-relaxed break-words">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-              components={{
-                pre({ children }) {
-                  return <>{children}</>;
-                },
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                code({ className, children, ...props }: any) {
-                  const match = /language-(\w+)/.exec(className || '');
-                  const rawCode = extractText(children);
-                  const isMultiLine = rawCode.includes('\n');
-
-                  if (match || isMultiLine) {
-                    return (
-                      <CodeBlock
-                        language={match ? match[1] : ''}
-                        rawCode={rawCode}
-                      >
-                        {children}
-                      </CodeBlock>
-                    );
-                  }
-                  return (
-                    <code
-                      className="px-1.5 py-0.5 rounded bg-white/[0.08] text-indigo-200 font-mono text-[12px] border border-white/[0.06]"
-                      {...props}
-                    >
-                      {children}
-                    </code>
-                  );
-                },
-              }}
-            >
-              {message.content
+            {(() => {
+              let cleaned = message.content
                 .replace(/<raizel_artifact[\s\S]*?<\/raizel_artifact>/gi, '')
-                .replace(/<raizel_operation[\s\S]*?<\/raizel_operation>/gi, '')
-                .trim() || message.content}
-            </ReactMarkdown>
+                .replace(/<raizel_operation[\s\S]*?<\/raizel_operation>/gi, '');
+              // Clean unclosed in-progress tags
+              cleaned = cleaned
+                .replace(/<raizel_artifact[\s\S]*$/gi, '')
+                .replace(/<raizel_operation[\s\S]*$/gi, '')
+                .trim();
+
+              if (!cleaned && (message.hasArtifact || message.artifactSummary || message.content.includes('<raizel_'))) {
+                return (
+                  <p className="text-xs text-indigo-300/80 italic flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
+                    <span>Project structure generated directly into the Workspace panel.</span>
+                  </p>
+                );
+              }
+
+              return (
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeHighlight]}
+                  components={{
+                    pre({ children }) {
+                      return <>{children}</>;
+                    },
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    code({ className, children, ...props }: any) {
+                      const match = /language-(\w+)/.exec(className || '');
+                      const rawCode = extractText(children);
+                      const isMultiLine = rawCode.includes('\n');
+
+                      if (match || isMultiLine) {
+                        return (
+                          <CodeBlock
+                            language={match ? match[1] : ''}
+                            rawCode={rawCode}
+                          >
+                            {children}
+                          </CodeBlock>
+                        );
+                      }
+                      return (
+                        <code
+                          className="px-1.5 py-0.5 rounded bg-white/[0.08] text-indigo-200 font-mono text-[12px] border border-white/[0.06]"
+                          {...props}
+                        >
+                          {children}
+                        </code>
+                      );
+                    },
+                  }}
+                >
+                  {cleaned || message.content}
+                </ReactMarkdown>
+              );
+            })()}
           </div>
 
           <div className="mt-2 flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">

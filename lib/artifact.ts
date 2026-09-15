@@ -134,6 +134,7 @@ export function applyArtifactOperations(
   operations: ArtifactOperation[]
 ): ArtifactProject {
   let updatedFiles = [...currentProject.files];
+  let activePath = currentProject.activeFilePath;
 
   for (const op of operations) {
     const normPath = normalizeRelativePath(op.path);
@@ -152,6 +153,8 @@ export function applyArtifactOperations(
         const prev = updatedFiles[existingIdx];
         updatedFiles[existingIdx] = {
           ...prev,
+          path: normPath,
+          name,
           content,
           language,
           previousContent: prev.content !== content ? prev.content : prev.previousContent,
@@ -170,28 +173,34 @@ export function applyArtifactOperations(
       }
     } else if (op.operation === 'delete_file') {
       updatedFiles = updatedFiles.filter((f) => normalizeRelativePath(f.path) !== normPath);
+      if (normalizeRelativePath(activePath) === normPath) {
+        activePath = updatedFiles[0]?.path || '';
+      }
     } else if (op.operation === 'rename_file' && op.newPath) {
       const newNorm = normalizeRelativePath(op.newPath);
       if (isSafeExportPath(newNorm)) {
-        updatedFiles = updatedFiles.map((f) =>
-          normalizeRelativePath(f.path) === normPath
-            ? {
-                ...f,
-                path: newNorm,
-                name: newNorm.split('/').pop() || newNorm,
-                language: inferLanguageFromPath(newNorm),
-                isModified: true,
-                updatedAt: Date.now(),
-              }
-            : f
-        );
+        updatedFiles = updatedFiles.map((f) => {
+          if (normalizeRelativePath(f.path) === normPath) {
+            return {
+              ...f,
+              path: newNorm,
+              name: newNorm.split('/').pop() || newNorm,
+              language: inferLanguageFromPath(newNorm),
+              isModified: true,
+              updatedAt: Date.now(),
+            };
+          }
+          return f;
+        });
+        if (normalizeRelativePath(activePath) === normPath) {
+          activePath = newNorm;
+        }
       }
     }
   }
 
-  // Ensure activeFilePath points to a valid file
-  let activePath = currentProject.activeFilePath;
-  if (!updatedFiles.some((f) => f.path === activePath)) {
+  // Ensure activeFilePath points to a valid file in the project
+  if (!updatedFiles.some((f) => normalizeRelativePath(f.path) === normalizeRelativePath(activePath))) {
     activePath = updatedFiles[0]?.path || '';
   }
 
@@ -200,8 +209,91 @@ export function applyArtifactOperations(
     files: updatedFiles,
     activeFilePath: activePath,
     updatedAt: Date.now(),
-    version: currentProject.version + 1,
+    version: (currentProject.version || 1) + 1,
   };
+}
+
+/**
+ * Generation stages for large project scaffolding
+ */
+export const GENERATION_STAGES = [
+  { id: 'plan', label: 'Architecture & Plan' },
+  { id: 'structure', label: 'Project Structure' },
+  { id: 'config', label: 'Core Configuration' },
+  { id: 'features', label: 'Feature Implementation' },
+  { id: 'styling', label: 'Styling & Polish' },
+  { id: 'review', label: 'Final Verification' },
+] as const;
+
+/**
+ * Detects real generation progress stages from streaming response text.
+ */
+export function detectCurrentGenerationStage(text: string): {
+  stage: string;
+  stageIndex: number;
+  percent: number;
+} {
+  const lower = text.toLowerCase();
+
+  if (lower.includes('</raizel_artifact>') || lower.includes('final review') || lower.includes('complete files')) {
+    return { stage: 'Final Verification', stageIndex: 5, percent: 95 };
+  }
+  if (lower.includes('globals.css') || lower.includes('.css') || lower.includes('tailwind')) {
+    return { stage: 'Styling & Polish', stageIndex: 4, percent: 80 };
+  }
+  if (lower.includes('components/') || lower.includes('app/page') || lower.includes('src/')) {
+    return { stage: 'Feature Implementation', stageIndex: 3, percent: 60 };
+  }
+  if (lower.includes('package.json') || lower.includes('tsconfig.json') || lower.includes('requirements.txt')) {
+    return { stage: 'Core Configuration', stageIndex: 2, percent: 35 };
+  }
+  if (lower.includes('<raizel_artifact') || lower.includes('file structure') || lower.includes('files:')) {
+    return { stage: 'Project Structure', stageIndex: 1, percent: 20 };
+  }
+
+  return { stage: 'Architecture & Plan', stageIndex: 0, percent: 10 };
+}
+
+/**
+ * Progressively extracts completed <file> tags from an in-progress stream.
+ * Allows the file tree and right-side editor to update dynamically while the AI is writing.
+ */
+export function extractStreamingFiles(streamText: string): ArtifactFile[] {
+  const fileRegex = /<file\s+([^>]*?)>([\s\S]*?)<\/file>/gi;
+  const files: ArtifactFile[] = [];
+  let fileMatch: RegExpExecArray | null;
+
+  const getAttr = (raw: string, name: string): string | undefined => {
+    const doubleQuote = new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i');
+    const singleQuote = new RegExp(`${name}\\s*=\\s*'([^']*)'`, 'i');
+    const noQuote = new RegExp(`${name}\\s*=\\s*(\\S+)`, 'i');
+    const m = doubleQuote.exec(raw) || singleQuote.exec(raw) || noQuote.exec(raw);
+    return m ? m[1].trim() : undefined;
+  };
+
+  while ((fileMatch = fileRegex.exec(streamText)) !== null) {
+    const fileAttrs = fileMatch[1];
+    const rawPath = getAttr(fileAttrs, 'path');
+    if (!rawPath) continue;
+
+    const normPath = normalizeRelativePath(rawPath);
+    if (!isSafeExportPath(normPath)) continue;
+
+    const langAttr = getAttr(fileAttrs, 'language') || getAttr(fileAttrs, 'lang');
+    const content = fileMatch[2].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+    const language = langAttr || inferLanguageFromPath(normPath);
+    const fileName = normPath.split('/').pop() || normPath;
+
+    files.push({
+      path: normPath,
+      name: fileName,
+      content,
+      language,
+      updatedAt: Date.now(),
+    });
+  }
+
+  return files;
 }
 
 /**
@@ -212,7 +304,7 @@ export function applyArtifactOperations(
  *   <file path="...">...</file>
  * </raizel_artifact>
  * or
- * <raizel_operation operation="create_file|update_file|delete_file" path="...">
+ * <raizel_operation operation="create_file|update_file|delete_file|rename_file" path="..." newPath="...">
  *   ...content...
  * </raizel_operation>
  */
@@ -251,7 +343,6 @@ export function parseArtifactFromResponse(text: string): {
     const title = getAttr(rawAttrs, 'title') || `${name} Project`;
     const description = getAttr(rawAttrs, 'description');
 
-    // Support file tags with various attribute orderings and optional language attribute
     const fileRegex = /<file\s+([^>]*?)>([\s\S]*?)<\/file>/gi;
     const files: ArtifactFile[] = [];
     let fileMatch: RegExpExecArray | null;
@@ -265,7 +356,6 @@ export function parseArtifactFromResponse(text: string): {
       if (!isSafeExportPath(normPath)) continue;
 
       const langAttr = getAttr(fileAttrs, 'language') || getAttr(fileAttrs, 'lang');
-      // Trim leading/trailing newlines from file content but preserve internal formatting
       const content = fileMatch[2].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
       const language = langAttr || inferLanguageFromPath(normPath);
       const fileName = normPath.split('/').pop() || normPath;
@@ -317,7 +407,7 @@ export function parseArtifactFromResponse(text: string): {
         path,
         newPath,
         content,
-        language: inferLanguageFromPath(path),
+        language: inferLanguageFromPath(newPath || path),
       });
     }
   }

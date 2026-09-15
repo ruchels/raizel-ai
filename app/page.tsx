@@ -34,7 +34,11 @@ import {
 import {
   parseArtifactFromResponse,
   applyArtifactOperations,
+  detectCurrentGenerationStage,
+  extractStreamingFiles,
 } from '@/lib/artifact';
+import { buildProjectContext } from '@/lib/context';
+import { ProjectActionType } from '@/components/artifact/ArtifactHeader';
 import { Sidebar } from '@/components/Sidebar';
 import { ModelSelector } from '@/components/ModelSelector';
 import { ChatMessage } from '@/components/ChatMessage';
@@ -56,9 +60,11 @@ export default function Home() {
   const [isAboutOpen, setIsAboutOpen] = useState<boolean>(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
 
-  // Artifact State
+  // Artifact State & Real Generation Progress Tracking
   const [artifacts, setArtifacts] = useState<Record<string, ArtifactProject>>({});
   const [isArtifactOpen, setIsArtifactOpen] = useState<boolean>(false);
+  const [generationStage, setGenerationStage] = useState<string>('Architecture & Plan');
+  const [generationPercent, setGenerationPercent] = useState<number>(10);
 
   const [, startTransition] = useTransition();
 
@@ -239,6 +245,32 @@ export default function Home() {
     saveArtifactForConversation(activeId, updatedProject);
   };
 
+  // Trigger project-level actions (Phase 12)
+  const handleTriggerProjectAction = (action: ProjectActionType) => {
+    if (!activeArtifact) return;
+    switch (action) {
+      case 'security':
+        handleSendMessage('Perform a comprehensive defensive security review of this project. Inspect for OWASP Top 10 risks, insecure dependencies, secret exposure, and configuration issues. Provide detailed remediation advice and code fixes.');
+        break;
+      case 'review':
+        handleSendMessage('Perform a thorough code and architecture review of this project. Evaluate code modularity, TypeScript type safety, error boundaries, performance, and maintainability.');
+        break;
+      case 'fix':
+        handleSendMessage('Inspect the project for broken imports, syntax errors, and missing dependencies. Fix all identified issues and update the affected files using <raizel_operation>.');
+        break;
+      case 'explain':
+        handleSendMessage('Explain the architecture, file structure, component relationships, and data flow of this project.');
+        break;
+      case 'test':
+        handleSendMessage('Generate comprehensive unit and integration tests for the core modules and components in this project. Output tests using <raizel_operation>.');
+        break;
+    }
+  };
+
+  const handleAskAiToFix = (issuesPrompt: string) => {
+    handleSendMessage(issuesPrompt);
+  };
+
   // Launch Project Starter Template
   const handleSelectTemplate = (tmpl: ProjectTemplate) => {
     const newConvId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -414,64 +446,24 @@ export default function Home() {
     abortControllerRef.current = abortController;
 
     try {
-      // --- Context Management for Active Project ---
-      // If this conversation already has an active artifact, provide its structure to the LLM
+      // --- Project-Aware AI Context Management (Phase 3 & 5) ---
       const currentProj = artifacts[convId];
       let contextualizedMessages = [...updatedMessages];
 
       if (currentProj && currentProj.files.length > 0) {
-        // Send comprehensive file outline for full project awareness
-        const fileTreeSummary = currentProj.files
-          .slice(0, 60)
-          .map((f) => `- ${f.path} (${f.language}, ${f.content.length} chars)`)
-          .join('\n');
-
-        // Find relevant files mentioned by user, or active file
-        const lowerPrompt = rawPrompt.toLowerCase();
-        const relevantFiles = currentProj.files.filter((f) =>
-          lowerPrompt.includes(f.name.toLowerCase()) ||
-          lowerPrompt.includes(f.path.toLowerCase()) ||
-          f.path === currentProj.activeFilePath
-        );
-
-        // Also include package.json and layout files for dependency context
-        const contextualFiles = currentProj.files.filter((f) =>
-          f.name === 'package.json' ||
-          f.name === 'layout.tsx' ||
-          f.name === 'tsconfig.json' ||
-          f.path.includes('types/')
-        );
-
-        // Merge and deduplicate relevant + contextual files
-        const allContextFiles = [...relevantFiles];
-        for (const cf of contextualFiles) {
-          if (!allContextFiles.some((f) => f.path === cf.path)) {
-            allContextFiles.push(cf);
-          }
+        const projectContext = buildProjectContext(currentProj, rawPrompt);
+        if (projectContext.hasContext && projectContext.systemPromptAddition) {
+          contextualizedMessages = [
+            ...updatedMessages.slice(0, -1),
+            {
+              id: `ctx_${Date.now()}`,
+              role: 'system',
+              content: projectContext.systemPromptAddition,
+              createdAt: Date.now(),
+            },
+            updatedMessages[updatedMessages.length - 1],
+          ];
         }
-
-        const fileSnippets = allContextFiles
-          .slice(0, 8)
-          .map((f) => `--- File: ${f.path} ---\n${f.content.slice(0, 30000)}`)
-          .join('\n\n');
-
-        const projectContextNotice = `[ACTIVE PROJECT CONTEXT: "${currentProj.name}" — ${currentProj.title}]\n` +
-          `Total Files: ${currentProj.files.length}\n` +
-          `Project File Tree:\n${fileTreeSummary}\n\n` +
-          (fileSnippets ? `Relevant File Contents (for understanding imports, types, and dependencies):\n${fileSnippets}\n\n` : '') +
-          `INSTRUCTIONS: When modifying this project, use <raizel_operation> tags. Always provide the COMPLETE file content for each operation, not partial diffs. Ensure all imports and cross-file references remain valid.`;
-
-        // Prepend context as a system note right before the user message
-        contextualizedMessages = [
-          ...updatedMessages.slice(0, -1),
-          {
-            id: `ctx_${Date.now()}`,
-            role: 'system',
-            content: projectContextNotice,
-            createdAt: Date.now(),
-          },
-          updatedMessages[updatedMessages.length - 1],
-        ];
       }
 
       const apiMessages = contextualizedMessages.map((m) => ({
@@ -537,6 +529,39 @@ export default function Home() {
 
                 if (parsed.delta) {
                   fullText += parsed.delta;
+
+                  // Real-time stage detection (Phase 4)
+                  const stageInfo = detectCurrentGenerationStage(fullText);
+                  setGenerationStage(stageInfo.stage);
+                  setGenerationPercent(stageInfo.percent);
+
+                  // Auto-open workspace when project tags appear in stream (Phase 11 & 13)
+                  if (!isArtifactOpen && (fullText.includes('<raizel_artifact') || fullText.includes('<raizel_operation'))) {
+                    setIsArtifactOpen(true);
+                  }
+
+                  // Progressive file extraction: update file tree as files complete streaming
+                  const streamedFiles = extractStreamingFiles(fullText);
+                  if (streamedFiles.length > 0) {
+                    const existing = artifacts[convId];
+                    if (!existing || streamedFiles.length > existing.files.length) {
+                      const liveProject: ArtifactProject = {
+                        id: existing?.id || `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                        conversationId: convId,
+                        name: existing?.name || 'project',
+                        title: existing?.title || 'Building Project...',
+                        description: existing?.description,
+                        files: streamedFiles,
+                        activeFilePath: existing?.activeFilePath && streamedFiles.some((f) => f.path === existing.activeFilePath)
+                          ? existing.activeFilePath
+                          : streamedFiles[streamedFiles.length - 1]?.path || '',
+                        createdAt: existing?.createdAt || Date.now(),
+                        updatedAt: Date.now(),
+                        version: existing?.version || 1,
+                      };
+                      setArtifacts((prev) => ({ ...prev, [convId!]: liveProject }));
+                    }
+                  }
                 }
 
                 if (parsed.delta || parsed.reasoning) {
@@ -575,17 +600,18 @@ export default function Home() {
         const parsedArtifact = parseArtifactFromResponse(fullText);
 
         if (parsedArtifact.project && parsedArtifact.project.files.length > 0) {
+          const existing = artifacts[convId];
           const newArtifact: ArtifactProject = {
-            id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            id: existing?.id || `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
             conversationId: convId,
             name: parsedArtifact.project.name,
             title: parsedArtifact.project.title,
             description: parsedArtifact.project.description,
             files: parsedArtifact.project.files,
             activeFilePath: parsedArtifact.project.files[0]?.path || '',
-            createdAt: Date.now(),
+            createdAt: existing?.createdAt || Date.now(),
             updatedAt: Date.now(),
-            version: 1,
+            version: (existing?.version || 0) + 1,
           };
 
           startTransition(() => {
@@ -927,6 +953,10 @@ export default function Home() {
         onSaveFileContent={handleSaveFileContent}
         onSelectFile={handleSelectFile}
         isGenerating={isLoading}
+        generationStage={generationStage}
+        generationPercent={generationPercent}
+        onTriggerProjectAction={handleTriggerProjectAction}
+        onAskAiToFix={handleAskAiToFix}
       />
 
       {/* Settings Modal */}
