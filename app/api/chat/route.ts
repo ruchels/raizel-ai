@@ -149,6 +149,7 @@ CRITICAL INSTRUCTIONS:
               }
             }, 3500);
 
+            let totalTokensReceived = 0;
             try {
               for await (const chunk of streamResponse) {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -157,6 +158,7 @@ CRITICAL INSTRUCTIONS:
                 const reasoning = delta?.reasoning_content || delta?.thinking || '';
 
                 if (text || reasoning) {
+                  totalTokensReceived++;
                   controller.enqueue(
                     encoder.encode(
                       `data: ${JSON.stringify({
@@ -167,7 +169,18 @@ CRITICAL INSTRUCTIONS:
                   );
                 }
               }
-              controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+
+              if (totalTokensReceived === 0) {
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      error: 'Model provider terputus tanpa menghasilkan respon (Claude Opus kemungkinan overload atau request timeout di server AI). Silakan gunakan Claude Sonnet 5 / DeepSeek V4 Pro atau perkecil cakupan tugas.',
+                    })}\n\n`
+                  )
+                );
+              } else {
+                controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+              }
               clearInterval(pingTimer);
               controller.close();
             } catch (streamError) {

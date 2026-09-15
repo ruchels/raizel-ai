@@ -329,6 +329,13 @@ export default function Home() {
             }
           }
         }
+
+        // If the stream ended without any output tokens or reasoning
+        if (!accumulatedText.trim() && !accumulatedReasoning.trim()) {
+          throw new Error(
+            'Model tidak memberikan respon atau koneksi terputus dari provider AI (Timeout/Overload). Silakan klik Try Again atau gunakan model yang lebih gesit seperti Claude Sonnet 5 atau DeepSeek V4 Pro.'
+          );
+        }
       } else {
         // Non-streaming response fallback
         const result = await response.json();
