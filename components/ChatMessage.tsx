@@ -32,15 +32,30 @@ interface ChatMessageProps {
 
 interface CodeBlockProps {
   language: string;
-  code: string;
+  rawCode: string;
+  children: React.ReactNode;
 }
 
-const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
+function extractText(node: React.ReactNode): string {
+  if (typeof node === 'string') return node;
+  if (typeof node === 'number') return String(node);
+  if (!node) return '';
+  if (Array.isArray(node)) {
+    return node.map(extractText).join('');
+  }
+  if (React.isValidElement(node)) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return extractText((node.props as any)?.children);
+  }
+  return '';
+}
+
+const CodeBlock: React.FC<CodeBlockProps> = ({ language, rawCode, children }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(code);
+      await navigator.clipboard.writeText(rawCode);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -75,7 +90,9 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
       </div>
       <div className="p-3.5 overflow-x-auto font-mono leading-relaxed text-[13px]">
         <pre className="!bg-transparent !p-0 !m-0">
-          <code>{code}</code>
+          <code className={language ? `language-${language} hljs` : 'hljs'}>
+            {children}
+          </code>
         </pre>
       </div>
     </div>
@@ -308,18 +325,23 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeHighlight]}
               components={{
+                pre({ children }) {
+                  return <>{children}</>;
+                },
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                code({ inline, className, children, ...props }: any) {
+                code({ className, children, ...props }: any) {
                   const match = /language-(\w+)/.exec(className || '');
-                  const codeString = String(children).replace(/\n$/, '');
-                  const isMultiLine = codeString.includes('\n');
+                  const rawCode = extractText(children);
+                  const isMultiLine = rawCode.includes('\n');
 
-                  if (!inline && (match || isMultiLine)) {
+                  if (match || isMultiLine) {
                     return (
                       <CodeBlock
                         language={match ? match[1] : ''}
-                        code={codeString}
-                      />
+                        rawCode={rawCode}
+                      >
+                        {children}
+                      </CodeBlock>
                     );
                   }
                   return (
