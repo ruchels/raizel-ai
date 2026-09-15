@@ -19,6 +19,8 @@ import {
   Eye,
   Brain,
   ChevronDown,
+  FolderArchive,
+  ExternalLink,
 } from 'lucide-react';
 import { ChatMessage as ChatMessageType, FileAttachment } from '@/types/chat';
 import { getModelInfo } from '@/lib/models';
@@ -27,6 +29,7 @@ import { formatFileSize } from '@/lib/files';
 interface ChatMessageProps {
   message: ChatMessageType;
   onRetry?: () => void;
+  onOpenArtifact?: () => void;
   isLatestAssistant?: boolean;
 }
 
@@ -102,6 +105,7 @@ const CodeBlock: React.FC<CodeBlockProps> = ({ language, rawCode, children }) =>
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   onRetry,
+  onOpenArtifact,
 }) => {
   const isUser = message.role === 'user';
   const [copiedMessage, setCopiedMessage] = useState(false);
@@ -320,6 +324,38 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
           )}
 
+          {/* Artifact Project Card if generated */}
+          {message.artifactSummary && (
+            <div className="mb-3 p-3.5 rounded-2xl bg-gradient-to-r from-indigo-950/40 via-[#0e121d] to-purple-950/40 border border-indigo-500/30 flex items-center justify-between gap-3 shadow-lg shadow-indigo-950/30">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-indigo-600/20 border border-indigo-400/30 flex items-center justify-center text-indigo-300 shrink-0">
+                  <FolderArchive className="w-4 h-4 text-indigo-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
+                    <span>{message.artifactSummary.title || message.artifactSummary.name}</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">
+                      {message.artifactSummary.fileCount} files
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Project generated and loaded in workspace
+                  </div>
+                </div>
+              </div>
+              {onOpenArtifact && (
+                <button
+                  type="button"
+                  onClick={onOpenArtifact}
+                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-950/40 transition-colors cursor-pointer"
+                >
+                  <span>Open Workspace</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="markdown-body text-sm text-slate-200 leading-relaxed break-words">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
@@ -355,7 +391,10 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 },
               }}
             >
-              {message.content}
+              {message.content
+                .replace(/<raizel_artifact[\s\S]*?<\/raizel_artifact>/gi, '')
+                .replace(/<raizel_operation[\s\S]*?<\/raizel_operation>/gi, '')
+                .trim() || message.content}
             </ReactMarkdown>
           </div>
 

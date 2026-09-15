@@ -21,6 +21,13 @@ export interface ChatMessage {
   isError?: boolean;
   attachments?: FileAttachment[];
   reasoning?: string;
+  artifactId?: string;
+  hasArtifact?: boolean;
+  artifactSummary?: {
+    name: string;
+    fileCount: number;
+    title: string;
+  };
 }
 
 export interface Conversation {
@@ -28,6 +35,7 @@ export interface Conversation {
   title: string;
   model: string;
   messages: ChatMessage[];
+  currentArtifactId?: string;
   createdAt: number;
   updatedAt: number;
 }

@@ -1,5 +1,8 @@
 import JSZip from 'jszip';
 import { FileAttachment } from '@/types/chat';
+import { ArtifactProject, ArtifactFile } from '@/types/artifact';
+import { normalizeRelativePath, isSafeExportPath } from '@/lib/zip';
+import { inferLanguageFromPath } from '@/lib/artifact';
 
 /**
  * Checks if a file is an image based on mimeType or extension
@@ -215,3 +218,58 @@ export function formatFileSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/**
+ * Extracts a complete ArtifactProject from an uploaded ZIP file
+ */
+export async function extractArtifactFromZip(
+  file: File,
+  conversationId: string
+): Promise<ArtifactProject | null> {
+  try {
+    const zip = await JSZip.loadAsync(file);
+    const files: ArtifactFile[] = [];
+    const entries = Object.keys(zip.files);
+    const projectName = file.name.replace(/\.zip$/i, '') || 'uploaded-project';
+
+    for (const relativePath of entries) {
+      const entry = zip.files[relativePath];
+      if (!entry.dir) {
+        const normalized = normalizeRelativePath(relativePath);
+        if (!isSafeExportPath(normalized)) continue;
+
+        try {
+          const content = await entry.async('string');
+          files.push({
+            path: normalized,
+            name: normalized.split('/').pop() || normalized,
+            content,
+            language: inferLanguageFromPath(normalized),
+            updatedAt: Date.now(),
+          });
+        } catch {
+          // Binary or unsupported encoding - ignore safely
+        }
+      }
+    }
+
+    if (files.length === 0) return null;
+
+    return {
+      id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      conversationId,
+      name: projectName,
+      title: projectName,
+      description: `Imported from ${file.name} (${files.length} files)`,
+      files,
+      activeFilePath: files[0]?.path || '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      version: 1,
+    };
+  } catch (err) {
+    console.error('Failed to extract project artifact from zip', err);
+    return null;
+  }
+}
+

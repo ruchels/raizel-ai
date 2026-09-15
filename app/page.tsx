@@ -1,12 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useTransition } from 'react';
 import {
   Menu,
   Sparkles,
   Settings as SettingsIcon,
   PlusCircle,
-  Loader2,
+  FolderArchive,
 } from 'lucide-react';
 import {
   ChatMessage as ChatMessageType,
@@ -14,6 +14,10 @@ import {
   UserSettings,
   FileAttachment,
 } from '@/types/chat';
+import {
+  ArtifactProject,
+  ProjectTemplate,
+} from '@/types/artifact';
 import { DEFAULT_MODEL_ID, getModelInfo } from '@/lib/models';
 import {
   loadConversations,
@@ -24,7 +28,13 @@ import {
   saveSettings,
   DEFAULT_SETTINGS,
   generateTitleFromPrompt,
+  loadArtifacts,
+  saveArtifactForConversation,
 } from '@/lib/storage';
+import {
+  parseArtifactFromResponse,
+  applyArtifactOperations,
+} from '@/lib/artifact';
 import { Sidebar } from '@/components/Sidebar';
 import { ModelSelector } from '@/components/ModelSelector';
 import { ChatMessage } from '@/components/ChatMessage';
@@ -32,6 +42,7 @@ import { ChatInput } from '@/components/ChatInput';
 import { WelcomeScreen } from '@/components/WelcomeScreen';
 import { SettingsModal } from '@/components/SettingsModal';
 import { AboutModal } from '@/components/AboutModal';
+import { ArtifactWorkspace } from '@/components/artifact/ArtifactWorkspace';
 
 export default function Home() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -45,6 +56,12 @@ export default function Home() {
   const [isAboutOpen, setIsAboutOpen] = useState<boolean>(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
 
+  // Artifact State
+  const [artifacts, setArtifacts] = useState<Record<string, ArtifactProject>>({});
+  const [isArtifactOpen, setIsArtifactOpen] = useState<boolean>(false);
+
+  const [, startTransition] = useTransition();
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -57,12 +74,19 @@ export default function Home() {
     const savedConvs = loadConversations();
     setConversations(savedConvs);
 
+    const savedArtifacts = loadArtifacts();
+    setArtifacts(savedArtifacts);
+
     const savedActiveId = loadActiveConversationId();
     if (savedActiveId && savedConvs.some((c) => c.id === savedActiveId)) {
       setActiveId(savedActiveId);
       const activeConv = savedConvs.find((c) => c.id === savedActiveId);
       if (activeConv) {
         setSelectedModel(activeConv.model || loadedSettings.defaultModel);
+      }
+      // If active chat has an artifact, open workspace
+      if (savedArtifacts[savedActiveId]) {
+        setIsArtifactOpen(true);
       }
     }
   }, []);
@@ -96,11 +120,13 @@ export default function Home() {
 
   const activeConversation = conversations.find((c) => c.id === activeId);
   const currentMessages = activeConversation?.messages || [];
+  const activeArtifact = activeId ? artifacts[activeId] || null : null;
 
   // Create new chat
   const handleNewChat = () => {
     setActiveId(null);
     setInput('');
+    setIsArtifactOpen(false);
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       setIsLoading(false);
@@ -115,14 +141,29 @@ export default function Home() {
     if (conv) {
       setSelectedModel(conv.model);
     }
+    // Toggle artifact workspace if selected chat has an artifact
+    if (artifacts[id]) {
+      setIsArtifactOpen(true);
+    } else {
+      setIsArtifactOpen(false);
+    }
   };
 
   // Delete chat
   const handleDeleteConversation = (id: string) => {
     const updated = conversations.filter((c) => c.id !== id);
     setConversations(updated);
+    // Delete artifact mapping
+    setArtifacts((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    saveArtifactForConversation(id, null);
+
     if (activeId === id) {
       setActiveId(null);
+      setIsArtifactOpen(false);
     }
   };
 
@@ -137,8 +178,11 @@ export default function Home() {
   const handleClearAllChats = () => {
     setConversations([]);
     setActiveId(null);
+    setArtifacts({});
+    setIsArtifactOpen(false);
     localStorage.removeItem('raizel_ai_conversations');
     localStorage.removeItem('raizel_ai_active_conv_id');
+    localStorage.removeItem('raizel_ai_artifacts');
   };
 
   // Model switch
@@ -157,15 +201,127 @@ export default function Home() {
     saveSettings(newSettings);
   };
 
+  // Select file in active artifact
+  const handleSelectFile = (filePath: string) => {
+    if (!activeId || !activeArtifact) return;
+    const updatedProject: ArtifactProject = {
+      ...activeArtifact,
+      activeFilePath: filePath,
+    };
+    setArtifacts((prev) => ({ ...prev, [activeId]: updatedProject }));
+    saveArtifactForConversation(activeId, updatedProject);
+  };
+
+  // Save manual file edit from code editor
+  const handleSaveFileContent = (filePath: string, newContent: string) => {
+    if (!activeId || !activeArtifact) return;
+    const updatedFiles = activeArtifact.files.map((f) => {
+      if (f.path === filePath) {
+        return {
+          ...f,
+          content: newContent,
+          previousContent: f.content !== newContent ? f.content : f.previousContent,
+          isModified: true,
+          updatedAt: Date.now(),
+        };
+      }
+      return f;
+    });
+
+    const updatedProject: ArtifactProject = {
+      ...activeArtifact,
+      files: updatedFiles,
+      updatedAt: Date.now(),
+      version: activeArtifact.version + 1,
+    };
+
+    setArtifacts((prev) => ({ ...prev, [activeId]: updatedProject }));
+    saveArtifactForConversation(activeId, updatedProject);
+  };
+
+  // Launch Project Starter Template
+  const handleSelectTemplate = (tmpl: ProjectTemplate) => {
+    const newConvId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const newProject: ArtifactProject = {
+      id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      conversationId: newConvId,
+      name: tmpl.project.name,
+      title: tmpl.project.title,
+      description: tmpl.project.description,
+      files: tmpl.project.files,
+      activeFilePath: tmpl.project.activeFilePath,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      version: 1,
+    };
+
+    const userMessage: ChatMessageType = {
+      id: `msg_user_${Date.now()}`,
+      role: 'user',
+      content: `Load template: ${tmpl.name}`,
+      createdAt: Date.now(),
+    };
+
+    const assistantMessage: ChatMessageType = {
+      id: `msg_ast_${Date.now()}`,
+      role: 'assistant',
+      content: `I've created and loaded the **${tmpl.name}** project into your workspace (${tmpl.project.files.length} files).\n\nYou can inspect the file tree on the right, make edits in the code editor, or click **Download ZIP** to export the entire project.`,
+      model: selectedModel,
+      createdAt: Date.now(),
+      hasArtifact: true,
+      artifactSummary: {
+        name: tmpl.project.name,
+        title: tmpl.project.title,
+        fileCount: tmpl.project.files.length,
+      },
+    };
+
+    const newConv: Conversation = {
+      id: newConvId,
+      title: tmpl.name,
+      model: selectedModel,
+      messages: [userMessage, assistantMessage],
+      currentArtifactId: newProject.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    setConversations((prev) => [newConv, ...prev]);
+    setActiveId(newConvId);
+    setArtifacts((prev) => ({ ...prev, [newConvId]: newProject }));
+    saveArtifactForConversation(newConvId, newProject);
+    setIsArtifactOpen(true);
+  };
+
   // Send message
   const handleSendMessage = async (
     customPrompt?: string,
     attachmentsToSend: FileAttachment[] = []
   ) => {
-    const promptToSend = (customPrompt || input).trim();
-    if ((!promptToSend && attachmentsToSend.length === 0) || isLoading) return;
+    let rawPrompt = (customPrompt || input).trim();
+    if ((!rawPrompt && attachmentsToSend.length === 0) || isLoading) return;
 
     setInput('');
+
+    // --- Slash Commands Parser ---
+    if (rawPrompt.startsWith('/build')) {
+      const task = rawPrompt.replace(/^\/build\s*/i, '').trim();
+      rawPrompt = `Build project: ${task || 'portfolio website'}. Plan architecture and output all complete files using <raizel_artifact>.`;
+    } else if (rawPrompt.startsWith('/security')) {
+      const query = rawPrompt.replace(/^\/security\s*/i, '').trim();
+      rawPrompt = `Defensive Security Review: Inspect the project for security vulnerabilities, OWASP Top 10 risks, and insecure configurations. Provide specific remediation: ${query}`;
+    } else if (rawPrompt.startsWith('/review')) {
+      rawPrompt = `Code & Architecture Review: Thoroughly evaluate structure, code cleanliness, performance, and maintainability of the project.`;
+    } else if (rawPrompt.startsWith('/fix')) {
+      const issue = rawPrompt.replace(/^\/fix\s*/i, '').trim();
+      rawPrompt = `Fix issue in project: ${issue}. Update the affected files using <raizel_operation>.`;
+    } else if (rawPrompt.startsWith('/explain')) {
+      const topic = rawPrompt.replace(/^\/explain\s*/i, '').trim();
+      rawPrompt = `Explain architecture and flow: ${topic || 'current project structure'}.`;
+    } else if (rawPrompt.startsWith('/test')) {
+      const target = rawPrompt.replace(/^\/test\s*/i, '').trim();
+      rawPrompt = `Generate comprehensive unit and integration tests for: ${target || 'core modules'}.`;
+    }
 
     let convId = activeId;
     let targetConv = conversations.find((c) => c.id === convId);
@@ -174,7 +330,7 @@ export default function Home() {
     if (!convId || !targetConv) {
       convId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const titleBase =
-        promptToSend ||
+        rawPrompt ||
         (attachmentsToSend[0] ? `Attached: ${attachmentsToSend[0].name}` : 'New Chat');
       const newConv: Conversation = {
         id: convId,
@@ -189,10 +345,40 @@ export default function Home() {
       setActiveId(convId);
     }
 
+    // Check if user uploaded a ZIP archive attachment directly -> import as artifact!
+    const zipAtt = attachmentsToSend.find((a) => a.type === 'zip' && a.extractedFiles && a.extractedFiles.length > 0);
+    if (zipAtt && !artifacts[convId]) {
+      // Create initial project representation from ZIP files
+      const zipFiles = (zipAtt.extractedFiles || []).map((p) => ({
+        path: p,
+        name: p.split('/').pop() || p,
+        content: `// Content extracted from ${p}`,
+        language: p.split('.').pop() || 'plaintext',
+        updatedAt: Date.now(),
+      }));
+
+      const importedProject: ArtifactProject = {
+        id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        conversationId: convId,
+        name: zipAtt.name.replace(/\.zip$/i, ''),
+        title: `Imported Archive: ${zipAtt.name}`,
+        description: `Imported from ${zipAtt.name} (${zipFiles.length} files)`,
+        files: zipFiles,
+        activeFilePath: zipFiles[0]?.path || '',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        version: 1,
+      };
+
+      setArtifacts((prev) => ({ ...prev, [convId!]: importedProject }));
+      saveArtifactForConversation(convId, importedProject);
+      setIsArtifactOpen(true);
+    }
+
     const userMessage: ChatMessageType = {
       id: `msg_user_${Date.now()}`,
       role: 'user',
-      content: promptToSend,
+      content: rawPrompt,
       attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
       createdAt: Date.now(),
     };
@@ -228,8 +414,50 @@ export default function Home() {
     abortControllerRef.current = abortController;
 
     try {
-      // Build API request payload
-      const apiMessages = updatedMessages.map((m) => ({
+      // --- Context Management for Active Project ---
+      // If this conversation already has an active artifact, provide its structure to the LLM
+      const currentProj = artifacts[convId];
+      let contextualizedMessages = [...updatedMessages];
+
+      if (currentProj && currentProj.files.length > 0) {
+        // Send file outline and selected file context to avoid massive token bloat
+        const fileTreeSummary = currentProj.files
+          .slice(0, 40)
+          .map((f) => `- ${f.path} (${f.language})`)
+          .join('\n');
+
+        // Find relevant files mentioned by user, or active file
+        const lowerPrompt = rawPrompt.toLowerCase();
+        const relevantFiles = currentProj.files.filter((f) =>
+          lowerPrompt.includes(f.name.toLowerCase()) ||
+          lowerPrompt.includes(f.path.toLowerCase()) ||
+          f.path === currentProj.activeFilePath
+        );
+
+        const fileSnippets = relevantFiles
+          .slice(0, 4)
+          .map((f) => `--- File: ${f.path} ---\n${f.content.slice(0, 15000)}`)
+          .join('\n\n');
+
+        const projectContextNotice = `[ACTIVE PROJECT CONTEXT: "${currentProj.name}"]\n` +
+          `Project Files (${currentProj.files.length} total):\n${fileTreeSummary}\n\n` +
+          (fileSnippets ? `Relevant File Contents:\n${fileSnippets}\n\n` : '') +
+          `To modify existing files, wrap updates in: <raizel_operation operation="update_file" path="relative/path">...updated content...</raizel_operation>`;
+
+        // Prepend context as a system note right before the user message
+        contextualizedMessages = [
+          ...updatedMessages.slice(0, -1),
+          {
+            id: `ctx_${Date.now()}`,
+            role: 'system',
+            content: projectContextNotice,
+            createdAt: Date.now(),
+          },
+          updatedMessages[updatedMessages.length - 1],
+        ];
+      }
+
+      const apiMessages = contextualizedMessages.map((m) => ({
         role: m.role,
         content: m.content,
         attachments: m.attachments,
@@ -261,8 +489,8 @@ export default function Home() {
       if (contentType.includes('text/event-stream') && response.body) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
-        let accumulatedText = '';
-        let accumulatedReasoning = '';
+        let fullText = '';
+        let fullReasoning = '';
         let buffer = '';
 
         while (true) {
@@ -286,22 +514,18 @@ export default function Home() {
                   throw new Error(parsed.error);
                 }
 
-                const hasNewContent = Boolean(parsed.delta);
-                const hasNewReasoning = Boolean(parsed.reasoning);
+                if (parsed.reasoning) {
+                  fullReasoning += parsed.reasoning;
+                }
 
-                if (hasNewContent || hasNewReasoning) {
+                if (parsed.delta) {
+                  fullText += parsed.delta;
+                }
+
+                if (parsed.delta || parsed.reasoning) {
                   setIsThinking(false);
-                }
 
-                if (hasNewReasoning) {
-                  accumulatedReasoning += parsed.reasoning;
-                }
-
-                if (hasNewContent) {
-                  accumulatedText += parsed.delta;
-                }
-
-                if (hasNewContent || hasNewReasoning) {
+                  // Update assistant message incrementally
                   setConversations((prev) =>
                     prev.map((c) =>
                       c.id === convId
@@ -311,8 +535,8 @@ export default function Home() {
                               m.id === assistantMessageId
                                 ? {
                                     ...m,
-                                    content: accumulatedText,
-                                    reasoning: accumulatedReasoning || undefined,
+                                    content: fullText,
+                                    reasoning: fullReasoning || undefined,
                                   }
                                 : m
                             ),
@@ -330,16 +554,130 @@ export default function Home() {
           }
         }
 
-        // If the stream ended without any output tokens or reasoning
-        if (!accumulatedText.trim() && !accumulatedReasoning.trim()) {
-          throw new Error(
-            'Model tidak memberikan respon atau koneksi terputus dari provider AI (Timeout/Overload). Silakan klik Try Again atau gunakan model yang lebih gesit seperti Claude Sonnet 5 atau DeepSeek V4 Pro.'
+        // Post-stream: Inspect accumulated response for Artifacts or Operations
+        const parsedArtifact = parseArtifactFromResponse(fullText);
+
+        if (parsedArtifact.project && parsedArtifact.project.files.length > 0) {
+          const newArtifact: ArtifactProject = {
+            id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            conversationId: convId,
+            name: parsedArtifact.project.name,
+            title: parsedArtifact.project.title,
+            description: parsedArtifact.project.description,
+            files: parsedArtifact.project.files,
+            activeFilePath: parsedArtifact.project.files[0]?.path || '',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            version: 1,
+          };
+
+          startTransition(() => {
+            setArtifacts((prev) => ({ ...prev, [convId!]: newArtifact }));
+            setIsArtifactOpen(true);
+          });
+          saveArtifactForConversation(convId, newArtifact);
+
+          // Update assistant message with artifactSummary
+          setConversations((prev) =>
+            prev.map((c) =>
+              c.id === convId
+                ? {
+                    ...c,
+                    messages: c.messages.map((m) =>
+                      m.id === assistantMessageId
+                        ? {
+                            ...m,
+                            hasArtifact: true,
+                            artifactSummary: {
+                              name: newArtifact.name,
+                              title: newArtifact.title,
+                              fileCount: newArtifact.files.length,
+                            },
+                          }
+                        : m
+                    ),
+                  }
+                : c
+            )
           );
+        } else if (parsedArtifact.operations && parsedArtifact.operations.length > 0) {
+          // Operations update to existing artifact
+          const existingArtifact = artifacts[convId];
+          if (existingArtifact) {
+            const updatedArtifact = applyArtifactOperations(existingArtifact, parsedArtifact.operations);
+            startTransition(() => {
+              setArtifacts((prev) => ({ ...prev, [convId!]: updatedArtifact }));
+              setIsArtifactOpen(true);
+            });
+            saveArtifactForConversation(convId, updatedArtifact);
+
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === convId
+                  ? {
+                      ...c,
+                      messages: c.messages.map((m) =>
+                        m.id === assistantMessageId
+                          ? {
+                              ...m,
+                              hasArtifact: true,
+                              artifactSummary: {
+                                name: updatedArtifact.name,
+                                title: updatedArtifact.title,
+                                fileCount: updatedArtifact.files.length,
+                              },
+                            }
+                          : m
+                      ),
+                    }
+                  : c
+              )
+            );
+          }
         }
       } else {
-        // Non-streaming response fallback
+        // Non-streaming fallback
         const result = await response.json();
         setIsThinking(false);
+        const responseText = result.content || '';
+
+        const parsedArtifact = parseArtifactFromResponse(responseText);
+
+        let artifactSummaryData: { name: string; title: string; fileCount: number } | undefined;
+
+        if (parsedArtifact.project && parsedArtifact.project.files.length > 0) {
+          const newArtifact: ArtifactProject = {
+            id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            conversationId: convId,
+            name: parsedArtifact.project.name,
+            title: parsedArtifact.project.title,
+            description: parsedArtifact.project.description,
+            files: parsedArtifact.project.files,
+            activeFilePath: parsedArtifact.project.files[0]?.path || '',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            version: 1,
+          };
+          setArtifacts((prev) => ({ ...prev, [convId!]: newArtifact }));
+          setIsArtifactOpen(true);
+          saveArtifactForConversation(convId, newArtifact);
+          artifactSummaryData = {
+            name: newArtifact.name,
+            title: newArtifact.title,
+            fileCount: newArtifact.files.length,
+          };
+        } else if (parsedArtifact.operations && parsedArtifact.operations.length > 0 && artifacts[convId]) {
+          const updated = applyArtifactOperations(artifacts[convId], parsedArtifact.operations);
+          setArtifacts((prev) => ({ ...prev, [convId!]: updated }));
+          setIsArtifactOpen(true);
+          saveArtifactForConversation(convId, updated);
+          artifactSummaryData = {
+            name: updated.name,
+            title: updated.title,
+            fileCount: updated.files.length,
+          };
+        }
+
         setConversations((prev) =>
           prev.map((c) =>
             c.id === convId
@@ -347,7 +685,12 @@ export default function Home() {
                   ...c,
                   messages: c.messages.map((m) =>
                     m.id === assistantMessageId
-                      ? { ...m, content: result.content }
+                      ? {
+                          ...m,
+                          content: responseText,
+                          hasArtifact: Boolean(artifactSummaryData),
+                          artifactSummary: artifactSummaryData,
+                        }
                       : m
                   ),
                 }
@@ -357,7 +700,6 @@ export default function Home() {
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name === 'AbortError') {
-        // User voluntarily stopped generation
         return;
       }
 
@@ -406,7 +748,6 @@ export default function Home() {
     const messages = activeConversation.messages;
     const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
     if (lastUserMessage) {
-      // Remove failed assistant message
       setConversations((prev) =>
         prev.map((c) =>
           c.id === activeId
@@ -426,7 +767,7 @@ export default function Home() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#08090d] text-slate-100 antialiased font-sans">
-      {/* Sidebar (Desktop & Mobile Drawer) */}
+      {/* Left Sidebar */}
       <Sidebar
         conversations={conversations}
         activeConversationId={activeId}
@@ -440,7 +781,7 @@ export default function Home() {
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
       />
 
-      {/* Main Workspace Area */}
+      {/* Center Main Chat Area */}
       <main className="flex-1 flex flex-col h-full min-w-0 relative">
         {/* Top Navbar */}
         <header className="h-14 sm:h-16 shrink-0 border-b border-white/[0.06] bg-[#090b11]/80 backdrop-blur-md px-3 sm:px-6 flex items-center justify-between z-20">
@@ -465,6 +806,26 @@ export default function Home() {
 
           {/* Right Header Action Icons */}
           <div className="flex items-center gap-2">
+            {/* Toggle Artifact Workspace Button (if active project exists) */}
+            {activeArtifact && (
+              <button
+                type="button"
+                onClick={() => setIsArtifactOpen(!isArtifactOpen)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                  isArtifactOpen
+                    ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/40 shadow-sm shadow-indigo-950/40'
+                    : 'bg-white/[0.04] hover:bg-white/[0.08] text-slate-300 border-white/[0.08]'
+                }`}
+                title="Toggle code workspace"
+              >
+                <FolderArchive className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden sm:inline">Workspace</span>
+                <span className="px-1.5 py-0.2 rounded-full bg-white/10 text-[10px] font-mono text-indigo-200">
+                  {activeArtifact.files.length}
+                </span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleNewChat}
@@ -489,7 +850,10 @@ export default function Home() {
         {/* Chat Feed Area */}
         <div className="flex-1 overflow-y-auto px-2 sm:px-6 py-4 flex flex-col">
           {currentMessages.length === 0 ? (
-            <WelcomeScreen onSelectPrompt={(prompt) => handleSendMessage(prompt)} />
+            <WelcomeScreen
+              onSelectPrompt={(prompt) => handleSendMessage(prompt)}
+              onSelectTemplate={handleSelectTemplate}
+            />
           ) : (
             <div className="max-w-4xl mx-auto w-full space-y-4 pb-4">
               {currentMessages.map((msg) => (
@@ -497,6 +861,7 @@ export default function Home() {
                   key={msg.id}
                   message={msg}
                   onRetry={msg.isError ? handleRetry : undefined}
+                  onOpenArtifact={() => setIsArtifactOpen(true)}
                 />
               ))}
 
@@ -536,6 +901,16 @@ export default function Home() {
           />
         </footer>
       </main>
+
+      {/* Right Persistent Code / Artifact Workspace */}
+      <ArtifactWorkspace
+        project={activeArtifact}
+        isOpen={isArtifactOpen && Boolean(activeArtifact)}
+        onClose={() => setIsArtifactOpen(false)}
+        onSaveFileContent={handleSaveFileContent}
+        onSelectFile={handleSelectFile}
+        isGenerating={isLoading}
+      />
 
       {/* Settings Modal */}
       <SettingsModal
