@@ -206,6 +206,7 @@ export function applyArtifactOperations(
 
 /**
  * Extracts artifact structures or file operations from AI text response.
+ * Supports multiple tag formats and attribute variations for robust parsing.
  * Looks for tags:
  * <raizel_artifact project="..." title="..." description="...">
  *   <file path="...">...</file>
@@ -227,7 +228,18 @@ export function parseArtifactFromResponse(text: string): {
 } {
   let cleanText = text;
 
+  // Helper: extract attribute value from a raw attributes string
+  // Supports: attr="value", attr='value', attr=value (no spaces in value)
+  const getAttr = (raw: string, name: string): string | undefined => {
+    const doubleQuote = new RegExp(`${name}\\s*=\\s*"([^"]*)"`, 'i');
+    const singleQuote = new RegExp(`${name}\\s*=\\s*'([^']*)'`, 'i');
+    const noQuote = new RegExp(`${name}\\s*=\\s*(\\S+)`, 'i');
+    const m = doubleQuote.exec(raw) || singleQuote.exec(raw) || noQuote.exec(raw);
+    return m ? m[1].trim() : undefined;
+  };
+
   // 1. Check for complete <raizel_artifact> block
+  // Support variations: extra whitespace, multiline attributes, self-closing variations
   const artifactBlockRegex = /<raizel_artifact\s+([^>]*?)>([\s\S]*?)<\/raizel_artifact>/i;
   const artifactMatch = text.match(artifactBlockRegex);
 
@@ -235,25 +247,26 @@ export function parseArtifactFromResponse(text: string): {
     const rawAttrs = artifactMatch[1];
     const innerContent = artifactMatch[2];
 
-    const nameMatch = /project="([^"]+)"/i.exec(rawAttrs) || /name="([^"]+)"/i.exec(rawAttrs);
-    const titleMatch = /title="([^"]+)"/i.exec(rawAttrs);
-    const descMatch = /description="([^"]+)"/i.exec(rawAttrs);
+    const name = getAttr(rawAttrs, 'project') || getAttr(rawAttrs, 'name') || 'project';
+    const title = getAttr(rawAttrs, 'title') || `${name} Project`;
+    const description = getAttr(rawAttrs, 'description');
 
-    const name = nameMatch ? nameMatch[1].trim() : 'project';
-    const title = titleMatch ? titleMatch[1].trim() : `${name} Project`;
-    const description = descMatch ? descMatch[1].trim() : undefined;
-
-    const fileRegex = /<file\s+path="([^"]+)"(?:\s+language="([^"]+)")?>([\s\S]*?)<\/file>/gi;
+    // Support file tags with various attribute orderings and optional language attribute
+    const fileRegex = /<file\s+([^>]*?)>([\s\S]*?)<\/file>/gi;
     const files: ArtifactFile[] = [];
     let fileMatch: RegExpExecArray | null;
 
     while ((fileMatch = fileRegex.exec(innerContent)) !== null) {
-      const rawPath = fileMatch[1].trim();
+      const fileAttrs = fileMatch[1];
+      const rawPath = getAttr(fileAttrs, 'path');
+      if (!rawPath) continue;
+
       const normPath = normalizeRelativePath(rawPath);
       if (!isSafeExportPath(normPath)) continue;
 
-      const langAttr = fileMatch[2]?.trim();
-      const content = fileMatch[3].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      const langAttr = getAttr(fileAttrs, 'language') || getAttr(fileAttrs, 'lang');
+      // Trim leading/trailing newlines from file content but preserve internal formatting
+      const content = fileMatch[2].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
       const language = langAttr || inferLanguageFromPath(normPath);
       const fileName = normPath.split('/').pop() || normPath;
 
@@ -281,15 +294,22 @@ export function parseArtifactFromResponse(text: string): {
   }
 
   // 2. Check for individual <raizel_operation> tags
-  const opRegex = /<raizel_operation\s+operation="([^"]+)"\s+path="([^"]+)"(?:\s+newPath="([^"]+)")?>([\s\S]*?)<\/raizel_operation>/gi;
+  // Support variations in attribute ordering (operation/path can be in any order)
+  const opRegex = /<raizel_operation\s+([^>]*?)>([\s\S]*?)<\/raizel_operation>/gi;
   const operations: ArtifactOperation[] = [];
   let opMatch: RegExpExecArray | null;
 
   while ((opMatch = opRegex.exec(text)) !== null) {
-    const opType = opMatch[1].trim() as ArtifactOperation['operation'];
-    const path = normalizeRelativePath(opMatch[2].trim());
-    const newPath = opMatch[3] ? normalizeRelativePath(opMatch[3].trim()) : undefined;
-    const content = opMatch[4]?.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+    const opAttrs = opMatch[1];
+    const opType = getAttr(opAttrs, 'operation') as ArtifactOperation['operation'] | undefined;
+    const rawPath = getAttr(opAttrs, 'path');
+    const rawNewPath = getAttr(opAttrs, 'newPath') || getAttr(opAttrs, 'new_path');
+
+    if (!opType || !rawPath) continue;
+
+    const path = normalizeRelativePath(rawPath.trim());
+    const newPath = rawNewPath ? normalizeRelativePath(rawNewPath.trim()) : undefined;
+    const content = opMatch[2]?.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
 
     if (isSafeExportPath(path)) {
       operations.push({

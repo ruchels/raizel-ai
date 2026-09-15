@@ -420,10 +420,10 @@ export default function Home() {
       let contextualizedMessages = [...updatedMessages];
 
       if (currentProj && currentProj.files.length > 0) {
-        // Send file outline and selected file context to avoid massive token bloat
+        // Send comprehensive file outline for full project awareness
         const fileTreeSummary = currentProj.files
-          .slice(0, 40)
-          .map((f) => `- ${f.path} (${f.language})`)
+          .slice(0, 60)
+          .map((f) => `- ${f.path} (${f.language}, ${f.content.length} chars)`)
           .join('\n');
 
         // Find relevant files mentioned by user, or active file
@@ -434,15 +434,32 @@ export default function Home() {
           f.path === currentProj.activeFilePath
         );
 
-        const fileSnippets = relevantFiles
-          .slice(0, 4)
-          .map((f) => `--- File: ${f.path} ---\n${f.content.slice(0, 15000)}`)
+        // Also include package.json and layout files for dependency context
+        const contextualFiles = currentProj.files.filter((f) =>
+          f.name === 'package.json' ||
+          f.name === 'layout.tsx' ||
+          f.name === 'tsconfig.json' ||
+          f.path.includes('types/')
+        );
+
+        // Merge and deduplicate relevant + contextual files
+        const allContextFiles = [...relevantFiles];
+        for (const cf of contextualFiles) {
+          if (!allContextFiles.some((f) => f.path === cf.path)) {
+            allContextFiles.push(cf);
+          }
+        }
+
+        const fileSnippets = allContextFiles
+          .slice(0, 8)
+          .map((f) => `--- File: ${f.path} ---\n${f.content.slice(0, 30000)}`)
           .join('\n\n');
 
-        const projectContextNotice = `[ACTIVE PROJECT CONTEXT: "${currentProj.name}"]\n` +
-          `Project Files (${currentProj.files.length} total):\n${fileTreeSummary}\n\n` +
-          (fileSnippets ? `Relevant File Contents:\n${fileSnippets}\n\n` : '') +
-          `To modify existing files, wrap updates in: <raizel_operation operation="update_file" path="relative/path">...updated content...</raizel_operation>`;
+        const projectContextNotice = `[ACTIVE PROJECT CONTEXT: "${currentProj.name}" — ${currentProj.title}]\n` +
+          `Total Files: ${currentProj.files.length}\n` +
+          `Project File Tree:\n${fileTreeSummary}\n\n` +
+          (fileSnippets ? `Relevant File Contents (for understanding imports, types, and dependencies):\n${fileSnippets}\n\n` : '') +
+          `INSTRUCTIONS: When modifying this project, use <raizel_operation> tags. Always provide the COMPLETE file content for each operation, not partial diffs. Ensure all imports and cross-file references remain valid.`;
 
         // Prepend context as a system note right before the user message
         contextualizedMessages = [
