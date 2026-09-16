@@ -55,6 +55,29 @@ function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Heuristic: does this message ask Raizel to DO something to the project
+ * (create/change/delete) rather than just explain or discuss it? Used only to
+ * decide whether a response with zero workspace changes deserves a corrective
+ * retry — never to gate whether tools run at all, and never as a substitute
+ * for the model's own judgement about read-only vs. execution requests.
+ */
+const EXECUTION_VERBS = [
+  // Indonesian
+  'buat', 'buatkan', 'bikin', 'bikinin', 'tambah', 'tambahkan', 'tambahin',
+  'ubah', 'ubahkan', 'perbaiki', 'benerin', 'betulkan', 'hapus', 'hapuskan',
+  'ganti', 'gantikan', 'implementasikan', 'kembangkan', 'rombak',
+  // English
+  'build', 'create', 'make', 'add', 'implement', 'fix', 'change', 'update',
+  'modify', 'delete', 'remove', 'refactor', 'generate', 'rewrite', 'rename',
+  'set up', 'scaffold',
+];
+
+function looksLikeExecutionRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return EXECUTION_VERBS.some((verb) => new RegExp(`\\b${verb}\\b`, 'i').test(normalized));
+}
+
 export default function Home() {
   /* --- persisted state --- */
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -550,6 +573,65 @@ export default function Home() {
           round++;
         }
 
+        /* --- self-check: catch a turn that described the task instead of doing it ---
+         *
+         * Root cause of the "buat game 3d terbagus" → "mana" failure: for large builds
+         * the model can legally answer in plain prose (a plan) with no <raizel_artifact>
+         * or <raizel_operation> tags. Nothing in the app tracked that a build was left
+         * mid-plan, so the very next user message was treated as an ordinary chat turn
+         * and the model correctly — but unhelpfully — reported that nothing was built.
+         * We now detect that outcome directly from the parsed response (not from guessing
+         * at the model's intent) and give it exactly one bounded chance to actually build
+         * before handing the turn back to the user. */
+        let noActionWarning: string | undefined;
+        const producedNoChange = (text: string) => {
+          const check = parseArtifactFromResponse(text);
+          return (!check.project || check.project.files.length === 0) && check.operations.length === 0;
+        };
+
+        if (
+          producedNoChange(finalText) &&
+          looksLikeExecutionRequest(prompt) &&
+          !controller.signal.aborted
+        ) {
+          setStatusLine('No files were written yet — asking Raizel to build instead of describe…');
+          const nudge =
+            'Your previous message described the task but contained no <raizel_artifact> or ' +
+            '<raizel_operation> block, so nothing was actually written to the project. Do not ' +
+            'apologize or restate the plan — respond now with the real, complete file(s) for ' +
+            'this request as workspace tags.';
+          try {
+            const retryText = await streamCompletion({
+              model,
+              messages: [
+                ...history,
+                { role: 'assistant' as const, content: finalText },
+                { role: 'user' as const, content: nudge },
+              ],
+              systemContext: context.systemContext,
+              signal: controller.signal,
+              onDelta: (accumulated, reasoning) => {
+                patchMessage(convId, assistantId, {
+                  content: `${finalText}\n\n${accumulated}`,
+                  reasoning: reasoning || undefined,
+                });
+              },
+              onFileProgress: setFilesWritten,
+            });
+            finalText = `${finalText}\n\n${retryText}`;
+          } catch {
+            // If the retry itself fails (e.g. aborted, provider error), fall through —
+            // the honest "nothing was built" warning below still applies.
+          }
+          setStatusLine(null);
+
+          if (producedNoChange(finalText)) {
+            noActionWarning =
+              'Raizel described this task but did not write any files, even after being asked ' +
+              'directly to build it. No changes were made to the project.';
+          }
+        }
+
         /* --- apply workspace output --- */
         const parsed = parseArtifactFromResponse(finalText);
         let changes: MessageChange[] | undefined;
@@ -625,6 +707,7 @@ export default function Home() {
             assistantMemory.saved.length > 0
               ? assistantMemory.saved.map((m) => ({ id: m.id, content: m.content }))
               : undefined,
+          noActionWarning,
         });
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {

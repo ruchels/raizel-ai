@@ -469,6 +469,13 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
         </button>
       )}
 
+      {message.noActionWarning && (
+        <div className="mt-3 flex gap-2.5 rounded-[var(--radius-md)] border border-[var(--danger)]/30 bg-[var(--danger-subtle)] p-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
+          <p className="text-[12.5px] leading-relaxed text-[var(--text)]">{message.noActionWarning}</p>
+        </div>
+      )}
+
       {message.memoryWrites && message.memoryWrites.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {message.memoryWrites.map((write) => (

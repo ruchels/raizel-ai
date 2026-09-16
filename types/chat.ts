@@ -63,6 +63,13 @@ export interface ChatMessage {
   memoryWrites?: Array<{ id: string; content: string }>;
   /** Files the model requested via read_file/search tools while answering. */
   toolCalls?: Array<{ tool: string; target: string; ok: boolean }>;
+  /**
+   * Set when the user's request looked like a build/change/delete request but
+   * the model's response (even after one automatic corrective retry) produced
+   * no actual workspace change. Shown honestly in the UI instead of silently
+   * pretending the turn succeeded — see lib/prompt.ts "EXECUTION IS MANDATORY".
+   */
+  noActionWarning?: string;
 }
 
 export interface Conversation {
