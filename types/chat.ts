@@ -1,15 +1,46 @@
+import type { MemorySettings } from './memory';
+
 export type Role = 'user' | 'assistant' | 'system';
+
+export type AttachmentType = 'image' | 'text' | 'zip' | 'document';
+
+/**
+ * `status` is the honesty contract for attachments:
+ *  - ready   : content was fully extracted and is available to the model
+ *  - partial : some of it was extracted; statusDetail says what was missed
+ *  - failed  : nothing was read; statusDetail says why
+ * The UI must render this rather than implying every upload was understood.
+ */
+export type AttachmentStatus = 'ready' | 'partial' | 'failed';
 
 export interface FileAttachment {
   id: string;
   name: string;
-  type: 'image' | 'text' | 'zip' | 'document';
+  type: AttachmentType;
   size: number;
   mimeType: string;
-  content?: string; // base64 for images or extracted text for documents/zip
-  previewUrl?: string; // data URL or thumbnail
+  status: AttachmentStatus;
+  /** Human-readable explanation of the status. Shown verbatim in the UI. */
+  statusDetail?: string;
+  /** Base64 data URL for images, extracted text for documents. */
+  content?: string;
+  previewUrl?: string;
   lineCount?: number;
-  extractedFiles?: string[]; // for zip: list of extracted files
+  language?: string;
+  /** ZIP only: normalized paths found inside the archive. */
+  extractedFiles?: string[];
+  fileCount?: number;
+  readableCount?: number;
+}
+
+/** A single file change produced by the assistant in one turn. */
+export interface MessageChange {
+  operation: 'create_file' | 'update_file' | 'delete_file' | 'rename_file';
+  path: string;
+  newPath?: string;
+  addedLines: number;
+  removedLines: number;
+  reason?: string;
 }
 
 export interface ChatMessage {
@@ -21,13 +52,17 @@ export interface ChatMessage {
   isError?: boolean;
   attachments?: FileAttachment[];
   reasoning?: string;
-  artifactId?: string;
-  hasArtifact?: boolean;
+  /** Set when this turn produced workspace changes. */
+  changes?: MessageChange[];
   artifactSummary?: {
     name: string;
-    fileCount: number;
     title: string;
+    fileCount: number;
   };
+  /** Memories written during this turn, so the UI can show them honestly. */
+  memoryWrites?: Array<{ id: string; content: string }>;
+  /** Files the model requested via read_file/search tools while answering. */
+  toolCalls?: Array<{ tool: string; target: string; ok: boolean }>;
 }
 
 export interface Conversation {
@@ -35,9 +70,10 @@ export interface Conversation {
   title: string;
   model: string;
   messages: ChatMessage[];
-  currentArtifactId?: string;
   createdAt: number;
   updatedAt: number;
+  /** Schema version, used by the storage migration path. */
+  schemaVersion?: number;
 }
 
 export type ModelProvider = 'Claude' | 'Grok' | 'DeepSeek' | 'Kimi' | 'GLM';
@@ -52,19 +88,28 @@ export interface ModelInfo {
   isDefault?: boolean;
 }
 
+export type ThemePreference = 'dark' | 'light' | 'system';
+
 export interface UserSettings {
-  theme: 'dark' | 'light' | 'system';
+  theme: ThemePreference;
   enterToSend: boolean;
   showTimestamps: boolean;
   saveHistory: boolean;
   defaultModel: string;
+  /** Auto-open the workspace panel when the assistant writes files. */
+  autoOpenWorkspace: boolean;
+  /** Allow the model to request extra files mid-answer (costs one extra round trip). */
+  allowFileRequests: boolean;
+  memory: MemorySettings;
 }
 
 export interface ChatRequestPayload {
   model: string;
   messages: Array<{
-    role: 'user' | 'assistant' | 'system';
+    role: Role;
     content: string;
+    attachments?: FileAttachment[];
   }>;
   stream?: boolean;
+  systemContext?: string;
 }

@@ -1,150 +1,128 @@
 'use client';
 
-import React, { useState, useRef, useEffect } from 'react';
-import { ChevronDown, Sparkles, Check, Cpu, Zap, Code2, Bot } from 'lucide-react';
-import { AVAILABLE_MODELS, PROVIDERS } from '@/lib/models';
-import { ModelInfo, ModelProvider } from '@/types/chat';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'lucide-react';
+import { AVAILABLE_MODELS, getModelInfo } from '@/lib/models';
+import type { ModelInfo } from '@/types/chat';
+import { cx } from './ui/primitives';
 
 interface ModelSelectorProps {
-  currentModelId: string;
-  onSelectModel: (modelId: string) => void;
+  value: string;
+  onChange: (modelId: string) => void;
   disabled?: boolean;
 }
 
-export const ModelSelector: React.FC<ModelSelectorProps> = ({
-  currentModelId,
-  onSelectModel,
-  disabled = false,
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+export const ModelSelector: React.FC<ModelSelectorProps> = ({ value, onChange, disabled }) => {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const currentModel =
-    AVAILABLE_MODELS.find((m) => m.id === currentModelId) ||
-    AVAILABLE_MODELS[0];
+  const current = getModelInfo(value);
 
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (
-        dropdownRef.current &&
-        !dropdownRef.current.contains(event.target as Node)
-      ) {
-        setIsOpen(false);
-      }
+  const groups = useMemo(() => {
+    const map = new Map<string, ModelInfo[]>();
+    for (const model of AVAILABLE_MODELS) {
+      const key = model.family || model.provider;
+      const list = map.get(key) ?? [];
+      list.push(model);
+      map.set(key, list);
     }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return Array.from(map.entries());
   }, []);
 
-  const getProviderIcon = (provider: ModelProvider) => {
-    switch (provider) {
-      case 'Claude':
-        return <Sparkles className="w-3.5 h-3.5 text-amber-400" />;
-      case 'Grok':
-        return <Zap className="w-3.5 h-3.5 text-sky-400" />;
-      case 'DeepSeek':
-        return <Code2 className="w-3.5 h-3.5 text-emerald-400" />;
-      case 'Kimi':
-        return <Cpu className="w-3.5 h-3.5 text-indigo-400" />;
-      case 'GLM':
-        return <Bot className="w-3.5 h-3.5 text-purple-400" />;
-    }
-  };
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
 
   return (
-    <div className="relative" ref={dropdownRef}>
+    <div ref={containerRef} className="relative">
       <button
         type="button"
         disabled={disabled}
-        onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-sm text-slate-200 font-medium transition-all duration-200 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 disabled:opacity-50 disabled:cursor-not-allowed group cursor-pointer"
-        aria-label="Select AI Model"
-      >
-        <span className="flex items-center gap-1.5">
-          {getProviderIcon(currentModel.provider)}
-          <span className="font-semibold text-white">{currentModel.name}</span>
-        </span>
-        {currentModel.badge && (
-          <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold border border-indigo-500/30">
-            {currentModel.badge}
-          </span>
+        onClick={() => setOpen((prev) => !prev)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={cx(
+          'inline-flex h-8 items-center gap-1.5 rounded-[var(--radius)] px-2.5 text-[13px] font-medium',
+          'text-[var(--text)] hover:bg-[var(--fill)] transition-colors',
+          'disabled:opacity-50 disabled:pointer-events-none',
+          open && 'bg-[var(--fill)]'
         )}
+      >
+        <span className="truncate max-w-[9rem] sm:max-w-none">
+          {current?.name ?? 'Select model'}
+        </span>
         <ChevronDown
-          className={`w-4 h-4 text-slate-400 transition-transform duration-200 group-hover:text-slate-200 ${
-            isOpen ? 'rotate-180' : ''
-          }`}
+          className={cx('h-3.5 w-3.5 text-[var(--text-muted)] transition-transform', open && 'rotate-180')}
         />
       </button>
 
-      {isOpen && (
-        <div className="absolute left-0 mt-2 w-72 sm:w-80 max-h-[75vh] overflow-y-auto rounded-2xl bg-[#0e121d] border border-white/10 shadow-2xl shadow-black/80 z-50 p-2 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
-          <div className="px-3 py-2 border-b border-white/[0.06] mb-1">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Select AI Engine
-            </span>
-          </div>
-
-          <div className="space-y-3 py-1">
-            {PROVIDERS.map((provider) => {
-              const models = AVAILABLE_MODELS.filter(
-                (m) => m.provider === provider
-              );
-              if (models.length === 0) return null;
-
-              return (
-                <div key={provider} className="space-y-1">
-                  <div className="flex items-center gap-1.5 px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    {getProviderIcon(provider)}
-                    <span>{provider}</span>
-                  </div>
-
-                  <div className="space-y-0.5">
-                    {models.map((model: ModelInfo) => {
-                      const isSelected = model.id === currentModelId;
-                      return (
-                        <button
-                          key={model.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectModel(model.id);
-                            setIsOpen(false);
-                          }}
-                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left text-sm transition-all duration-150 cursor-pointer ${
-                            isSelected
-                              ? 'bg-indigo-600/20 text-white border border-indigo-500/40'
-                              : 'text-slate-300 hover:bg-white/[0.06] hover:text-white border border-transparent'
-                          }`}
-                        >
-                          <div className="flex-1 pr-2 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={`font-medium truncate ${
-                                  isSelected ? 'text-indigo-200' : 'text-slate-200'
-                                }`}
-                              >
-                                {model.name}
-                              </span>
-                              {model.badge && (
-                                <span className="text-[9px] uppercase px-1.5 py-0.2 rounded bg-white/10 text-slate-300 font-semibold">
-                                  {model.badge}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                              {model.description}
-                            </p>
-                          </div>
-                          {isSelected && (
-                            <Check className="w-4 h-4 text-indigo-400 shrink-0" />
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      {open && (
+        <div
+          role="listbox"
+          className="absolute left-0 z-40 mt-1.5 max-h-[min(70dvh,28rem)] w-[min(92vw,20rem)] overflow-y-auto rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-raised)] py-1 shadow-[var(--shadow-lg)] animate-fade-in"
+        >
+          {groups.map(([family, models]) => (
+            <div key={family}>
+              <p className="px-3 pb-1 pt-2 text-[11px] font-medium text-[var(--text-muted)]">
+                {family}
+              </p>
+              {models.map((model) => {
+                const selected = model.id === value;
+                return (
+                  <button
+                    key={model.id}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    onClick={() => {
+                      onChange(model.id);
+                      setOpen(false);
+                    }}
+                    className={cx(
+                      'flex w-full items-start gap-2.5 px-3 py-1.5 text-left transition-colors',
+                      selected ? 'bg-[var(--fill)]' : 'hover:bg-[var(--fill)]'
+                    )}
+                  >
+                    <Check
+                      className={cx(
+                        'mt-0.5 h-3.5 w-3.5 shrink-0',
+                        selected ? 'text-[var(--accent-text)]' : 'opacity-0'
+                      )}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-[13px] font-medium text-[var(--text)]">{model.name}</span>
+                        {model.badge && (
+                          <span className="rounded-[var(--radius-sm)] bg-[var(--fill)] px-1 py-px text-[10px] text-[var(--text-muted)]">
+                            {model.badge}
+                          </span>
+                        )}
+                      </span>
+                      <span className="mt-0.5 block text-[12px] leading-snug text-[var(--text-muted)]">
+                        {model.description}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>

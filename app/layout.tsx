@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
 const inter = Inter({
@@ -8,32 +8,52 @@ const inter = Inter({
   variable: '--font-inter',
 });
 
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-mono-stack',
+});
+
 export const metadata: Metadata = {
-  title: 'RAIZEL AI — Your AI. Your Ideas. Your Power.',
+  title: 'RAIZEL',
   description:
-    'Modern, lightning-fast AI chat application powered by Rindri API Gateway with Claude Opus, Sonnet, Grok, DeepSeek, Kimi, and GLM models.',
-  keywords: ['AI Chat', 'RAIZEL AI', 'Claude Opus', 'DeepSeek', 'Grok', 'Rindri API'],
-  authors: [{ name: 'RAIZEL AI' }],
+    'An AI assistant with a project workspace, full-file understanding, and long-term memory.',
+  applicationName: 'RAIZEL',
 };
 
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
-  themeColor: '#08090d',
+  // Pinch-zoom stays enabled: disabling it is an accessibility failure.
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+    { media: '(prefers-color-scheme: dark)', color: '#0c0c0e' },
+  ],
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+/**
+ * Applies the stored theme before first paint so there is no light flash on a
+ * dark-mode reload. Kept inline and tiny on purpose.
+ */
+const THEME_BOOTSTRAP = `
+(function () {
+  try {
+    var raw = localStorage.getItem('raizel_ai_settings');
+    var pref = raw ? (JSON.parse(raw).theme || 'system') : 'system';
+    var dark = pref === 'dark' ||
+      (pref === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', dark);
+  } catch (e) {}
+})();
+`;
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${inter.variable} h-full antialiased`}>
-      <body className="min-h-full flex flex-col bg-[#08090d] text-slate-100 selection:bg-indigo-500/30 selection:text-indigo-200">
-        {children}
-      </body>
+    <html lang="en" className={`${inter.variable} ${mono.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+      </head>
+      <body>{children}</body>
     </html>
   );
 }

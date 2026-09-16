@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { ArtifactProject, ArtifactFile } from '@/types/artifact';
+import { redactSecrets } from '@/lib/security/secrets';
 
 // Strict blacklist of file patterns that must NEVER be packaged into exported ZIPs
 const FORBIDDEN_FILE_PATTERNS: RegExp[] = [
@@ -10,6 +11,9 @@ const FORBIDDEN_FILE_PATTERNS: RegExp[] = [
   /(^|\/)credentials(\..+)?$/i,
   /(^|\/)service-account.*\.json$/i,
   /(^|\/)client_secret.*\.json$/i,
+  /(^|\/)tokens?(\..+)?$/i,
+  /(^|\/)\.netrc$/i,
+  /(^|\/)\.pgpass$/i,
   // Node / Git system folders
   /(^|\/)node_modules(\/|$)/i,
   /(^|\/)\.git(\/|$)/i,
@@ -138,20 +142,11 @@ export function isSafeExportPath(filePath: string): boolean {
   return true;
 }
 
-// Regex patterns for detecting leaked secrets within file text content
-const SENSITIVE_CONTENT_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
-  { pattern: /-----BEGIN (?:RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----[\s\S]*?-----END (?:RSA|DSA|EC|OPENSSH|PGP)?\s*PRIVATE KEY-----/gi, label: 'Private Key' },
-  { pattern: /\bAKIA[0-9A-Z]{16}\b/g, label: 'AWS Access Key ID' },
-  { pattern: /\bghp_[a-zA-Z0-9]{36}\b/g, label: 'GitHub Personal Access Token' },
-  { pattern: /\bgithub_pat_[a-zA-Z0-9_]{82}\b/g, label: 'GitHub Fine-Grained PAT' },
-  { pattern: /\bsk-(?:proj|live|test)?[a-zA-Z0-9_-]{24,}\b/g, label: 'OpenAI/Provider Secret Key' },
-  { pattern: /\b(?:rindri|rnd)_[a-zA-Z0-9]{20,}\b/gi, label: 'Rindri Secret Token' },
-  { pattern: /(?:api_key|apikey|secret_key|private_key|auth_token)\s*[:=]\s*["']([a-zA-Z0-9_\-.]{20,})["']/gi, label: 'Hardcoded Secret Assignment' },
-];
-
 /**
- * Scans file content for exposed credentials, private keys, or API tokens.
- * Redacts any detected secrets before packaging into exported archives.
+ * Scans file content for exposed credentials, private keys, or API tokens and
+ * redacts them before packaging into exported archives.
+ * Detection rules live in lib/security/secrets.ts so export, memory, and
+ * context all enforce exactly the same policy.
  */
 export function sanitizeFileContentForExport(content: string, filePath: string): {
   sanitized: string;
@@ -162,25 +157,12 @@ export function sanitizeFileContentForExport(content: string, filePath: string):
     return { sanitized: '', hadSecrets: false, warnings: [] };
   }
 
-  let sanitized = content;
-  let hadSecrets = false;
-  const warnings: string[] = [];
-
-  for (const { pattern, label } of SENSITIVE_CONTENT_PATTERNS) {
-    if (pattern.test(sanitized)) {
-      hadSecrets = true;
-      warnings.push(`Detected & redacted ${label} in ${filePath}`);
-      // Replace sensitive token with security placeholder
-      sanitized = sanitized.replace(pattern, (match) => {
-        if (match.startsWith('-----BEGIN')) {
-          return '-----BEGIN ENCRYPTED PRIVATE KEY-----\n[REDACTED_BY_RAIZEL_SECURITY]\n-----END ENCRYPTED PRIVATE KEY-----';
-        }
-        return '[REDACTED_BY_RAIZEL_SECURITY]';
-      });
-    }
-  }
-
-  return { sanitized, hadSecrets, warnings };
+  const { text, redacted, labels } = redactSecrets(content, filePath);
+  return {
+    sanitized: text,
+    hadSecrets: redacted,
+    warnings: labels.map((label) => `Redacted ${label} in ${filePath}`),
+  };
 }
 
 /**
@@ -258,8 +240,9 @@ export async function downloadProjectZip(project: ArtifactProject): Promise<void
 export function downloadSingleFile(file: ArtifactFile): void {
   const normalized = normalizeRelativePath(file.path);
   if (!isSafeExportPath(normalized)) {
-    alert('This file cannot be exported for security reasons.');
-    return;
+    throw new Error(
+      `"${file.path}" is on the export blocklist (credentials, keys, or an unsafe path) and cannot be downloaded.`
+    );
   }
 
   const { sanitized } = sanitizeFileContentForExport(file.content || '', normalized);

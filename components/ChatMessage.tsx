@@ -1,152 +1,291 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import {
-  Copy,
-  Check,
-  RotateCcw,
-  Sparkles,
-  User,
   AlertTriangle,
-  FileCode,
-  FileArchive,
+  Brain,
+  Check,
+  ChevronRight,
+  Copy,
+  Download,
   FileText,
   Image as ImageIcon,
-  X,
-  Eye,
-  Brain,
-  ChevronDown,
-  FolderArchive,
-  ExternalLink,
+  PanelRight,
+  RotateCcw,
+  Search,
+  FileWarning,
+  Package,
 } from 'lucide-react';
-import { ChatMessage as ChatMessageType, FileAttachment } from '@/types/chat';
+import type { ChatMessage as Message, FileAttachment, MessageChange } from '@/types/chat';
 import { getModelInfo } from '@/lib/models';
 import { formatFileSize } from '@/lib/files';
+import { stripArtifactMarkup } from '@/lib/artifact';
+import { stripToolCalls } from '@/lib/project/tools';
+import { Badge, IconButton, cx } from './ui/primitives';
 
 interface ChatMessageProps {
-  message: ChatMessageType;
+  message: Message;
+  showTimestamp: boolean;
+  isStreaming?: boolean;
   onRetry?: () => void;
-  onOpenArtifact?: () => void;
-  isLatestAssistant?: boolean;
+  onOpenWorkspace?: () => void;
+  onOpenFile?: (path: string) => void;
 }
 
-interface CodeBlockProps {
-  language: string;
-  rawCode: string;
-  children: React.ReactNode;
-}
+/* ------------------------------------------------------------------ */
+/* Code block                                                          */
+/* ------------------------------------------------------------------ */
 
-function extractText(node: React.ReactNode): string {
+function nodeToText(node: React.ReactNode): string {
   if (typeof node === 'string') return node;
   if (typeof node === 'number') return String(node);
-  if (!node) return '';
-  if (Array.isArray(node)) {
-    return node.map(extractText).join('');
-  }
+  if (Array.isArray(node)) return node.map(nodeToText).join('');
   if (React.isValidElement(node)) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return extractText((node.props as any)?.children);
+    const props = node.props as { children?: React.ReactNode };
+    return nodeToText(props.children);
   }
   return '';
 }
 
-const CodeBlock: React.FC<CodeBlockProps> = ({ language, rawCode, children }) => {
+const CodeBlock: React.FC<{ language: string; raw: string; children: React.ReactNode }> = ({
+  language,
+  raw,
+  children,
+}) => {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = async () => {
+  const copy = async () => {
     try {
-      await navigator.clipboard.writeText(rawCode);
+      await navigator.clipboard.writeText(raw);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), 1600);
     } catch {
-      // Fallback if clipboard API unavailable
+      /* clipboard unavailable */
     }
   };
 
+  const download = () => {
+    const blob = new Blob([raw], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `snippet.${language || 'txt'}`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 200);
+  };
+
+  const lineCount = raw.split('\n').length;
+
   return (
-    <div className="my-3 rounded-xl overflow-hidden border border-white/10 bg-[#090b11] shadow-lg shadow-black/40 text-xs">
-      <div className="flex items-center justify-between px-3.5 py-1.5 bg-white/[0.04] border-b border-white/[0.08] text-slate-400">
-        <span className="font-mono font-semibold text-[11px] text-slate-300 uppercase tracking-wider">
-          {language || 'code'}
+    <figure className="my-3 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--code-bg)]">
+      <figcaption className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-1.5">
+        <span className="font-mono text-[11px] text-[var(--text-muted)]">
+          {language || 'text'}
+          {lineCount > 1 && <span className="ml-2 tabular">{lineCount} lines</span>}
         </span>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className="flex items-center gap-1.5 py-1 px-2 rounded-md hover:bg-white/10 text-slate-300 hover:text-white transition-colors cursor-pointer"
-          title="Copy code"
-        >
-          {copied ? (
-            <>
-              <Check className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-[11px] text-emerald-400 font-medium">Copied!</span>
-            </>
-          ) : (
-            <>
-              <Copy className="w-3.5 h-3.5" />
-              <span className="text-[11px] font-medium">Copy</span>
-            </>
+        <span className="flex items-center gap-0.5">
+          {lineCount > 12 && (
+            <IconButton label="Download snippet" size="sm" onClick={download}>
+              <Download className="h-3.5 w-3.5" />
+            </IconButton>
           )}
-        </button>
-      </div>
-      <div className="p-3.5 overflow-x-auto font-mono leading-relaxed text-[13px]">
-        <pre className="!bg-transparent !p-0 !m-0">
-          <code className={language ? `language-${language} hljs` : 'hljs'}>
-            {children}
-          </code>
+          <IconButton label={copied ? 'Copied' : 'Copy code'} size="sm" onClick={copy}>
+            {copied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
+          </IconButton>
+        </span>
+      </figcaption>
+      <div className="overflow-x-auto p-3">
+        <pre className="code-surface m-0 bg-transparent p-0">
+          <code className={cx('hljs', language && `language-${language}`)}>{children}</code>
         </pre>
       </div>
-    </div>
+    </figure>
   );
 };
 
+/* ------------------------------------------------------------------ */
+/* Attachments                                                         */
+/* ------------------------------------------------------------------ */
+
+const AttachmentChip: React.FC<{ attachment: FileAttachment; onPreview: () => void }> = ({
+  attachment,
+  onPreview,
+}) => {
+  const failed = attachment.status === 'failed';
+  const partial = attachment.status === 'partial';
+
+  const icon = failed ? (
+    <FileWarning className="h-3.5 w-3.5 shrink-0 text-[var(--danger)]" />
+  ) : attachment.type === 'image' ? (
+    <ImageIcon className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+  ) : attachment.type === 'zip' ? (
+    <Package className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+  ) : (
+    <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+  );
+
+  const meta = failed
+    ? 'not read'
+    : attachment.type === 'zip'
+      ? `${attachment.fileCount ?? 0} files`
+      : attachment.lineCount
+        ? `${attachment.lineCount} lines`
+        : formatFileSize(attachment.size);
+
+  return (
+    <button
+      type="button"
+      onClick={onPreview}
+      title={attachment.statusDetail || attachment.name}
+      className={cx(
+        'flex max-w-[15rem] items-center gap-2 rounded-[var(--radius)] border px-2 py-1.5 text-left transition-colors',
+        failed
+          ? 'border-[var(--danger)]/40 bg-[var(--danger-subtle)]'
+          : 'border-[var(--border)] bg-[var(--bg-subtle)] hover:bg-[var(--fill)]'
+      )}
+    >
+      {attachment.previewUrl ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={attachment.previewUrl}
+          alt=""
+          className="h-6 w-6 shrink-0 rounded-[var(--radius-sm)] object-cover"
+        />
+      ) : (
+        icon
+      )}
+      <span className="min-w-0">
+        <span className="block truncate text-[12px] font-medium text-[var(--text)]">
+          {attachment.name}
+        </span>
+        <span
+          className={cx(
+            'block text-[11px] tabular',
+            failed ? 'text-[var(--danger)]' : partial ? 'text-[var(--warning)]' : 'text-[var(--text-muted)]'
+          )}
+        >
+          {meta}
+        </span>
+      </span>
+    </button>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Changes                                                             */
+/* ------------------------------------------------------------------ */
+
+const OPERATION_LABEL: Record<MessageChange['operation'], string> = {
+  create_file: 'Created',
+  update_file: 'Updated',
+  delete_file: 'Deleted',
+  rename_file: 'Renamed',
+};
+
+const ChangeList: React.FC<{
+  changes: MessageChange[];
+  onOpenFile?: (path: string) => void;
+}> = ({ changes, onOpenFile }) => (
+  <div className="my-3 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
+    <div className="border-b border-[var(--border)] bg-[var(--bg-subtle)] px-3 py-1.5">
+      <span className="text-[12px] font-medium text-[var(--text-secondary)]">
+        {changes.length} file {changes.length === 1 ? 'change' : 'changes'}
+      </span>
+    </div>
+    <ul className="divide-y divide-[var(--border)]">
+      {changes.map((change, index) => (
+        <li key={`${change.path}-${index}`}>
+          <button
+            type="button"
+            onClick={() => onOpenFile?.(change.newPath || change.path)}
+            className="flex w-full items-center gap-2.5 px-3 py-2 text-left hover:bg-[var(--fill)]"
+          >
+            <span className="w-14 shrink-0 text-[11px] font-medium text-[var(--text-muted)]">
+              {OPERATION_LABEL[change.operation]}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-mono text-[12px] text-[var(--text)]">
+                {change.newPath ? `${change.path} → ${change.newPath}` : change.path}
+              </span>
+              {change.reason && (
+                <span className="mt-0.5 block truncate text-[11px] text-[var(--text-muted)]">
+                  {change.reason}
+                </span>
+              )}
+            </span>
+            <span className="shrink-0 tabular text-[11px]">
+              {change.addedLines > 0 && (
+                <span className="text-[var(--diff-add-text)]">+{change.addedLines}</span>
+              )}
+              {change.addedLines > 0 && change.removedLines > 0 && ' '}
+              {change.removedLines > 0 && (
+                <span className="text-[var(--diff-del-text)]">−{change.removedLines}</span>
+              )}
+            </span>
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+          </button>
+        </li>
+      ))}
+    </ul>
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
+/* Message                                                             */
+/* ------------------------------------------------------------------ */
+
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
+  showTimestamp,
+  isStreaming,
   onRetry,
-  onOpenArtifact,
+  onOpenWorkspace,
+  onOpenFile,
 }) => {
-  const isUser = message.role === 'user';
-  const [copiedMessage, setCopiedMessage] = useState(false);
-  const [previewAttachment, setPreviewAttachment] = useState<FileAttachment | null>(null);
-  const [isThinkingExpanded, setIsThinkingExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [preview, setPreview] = useState<FileAttachment | null>(null);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
 
-  const handleCopyMessage = async () => {
+  const isUser = message.role === 'user';
+
+  const prose = useMemo(
+    () => stripToolCalls(stripArtifactMarkup(message.content)),
+    [message.content]
+  );
+
+  const copyMessage = async () => {
     try {
-      await navigator.clipboard.writeText(message.content);
-      setCopiedMessage(true);
-      setTimeout(() => setCopiedMessage(false), 2000);
+      await navigator.clipboard.writeText(prose || message.content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
     } catch {
-      // ignore
+      /* clipboard unavailable */
     }
   };
 
-  const getAttachmentIcon = (att: FileAttachment) => {
-    if (att.type === 'image') return <ImageIcon className="w-3.5 h-3.5 text-indigo-300 shrink-0" />;
-    if (att.type === 'zip') return <FileArchive className="w-3.5 h-3.5 text-amber-300 shrink-0" />;
-    if (att.name.includes('.')) return <FileCode className="w-3.5 h-3.5 text-emerald-300 shrink-0" />;
-    return <FileText className="w-3.5 h-3.5 text-sky-300 shrink-0" />;
-  };
+  const timestamp = showTimestamp
+    ? new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
 
-  const modelInfo = message.model ? getModelInfo(message.model) : undefined;
-  const modelDisplayName = modelInfo?.name || message.model || 'RAIZEL AI';
-
+  /* --- error --- */
   if (message.isError) {
     return (
-      <div className="w-full flex justify-start my-3 px-2 sm:px-0">
-        <div className="flex gap-3 max-w-2xl rounded-2xl bg-rose-950/30 border border-rose-500/30 p-4 text-rose-200 backdrop-blur-md">
-          <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-          <div className="space-y-2 flex-1 text-sm">
-            <p className="font-medium text-rose-300">{message.content}</p>
+      <div className="py-3">
+        <div className="flex gap-3 rounded-[var(--radius-md)] border border-[var(--danger)]/30 bg-[var(--danger-subtle)] p-3.5">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--danger)]" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] leading-relaxed text-[var(--text)]">{message.content}</p>
             {onRetry && (
               <button
                 type="button"
                 onClick={onRetry}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-semibold text-rose-200 transition-colors cursor-pointer"
+                className="mt-2.5 inline-flex items-center gap-1.5 text-[13px] font-medium text-[var(--accent-text)] hover:underline"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
-                Try Again
+                <RotateCcw className="h-3.5 w-3.5" />
+                Try again
               </button>
             )}
           </div>
@@ -155,290 +294,260 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     );
   }
 
+  /* --- user --- */
   if (isUser) {
     return (
-      <div className="w-full flex justify-end my-3 px-2 sm:px-0">
-        <div className="flex gap-2 max-w-[85%] sm:max-w-xl group">
-          <div className="flex flex-col items-end">
-            {/* Render Attached Files / Snippets */}
-            {message.attachments && message.attachments.length > 0 && (
-              <div className="flex flex-wrap justify-end gap-2 mb-2">
-                {message.attachments.map((att) => (
-                  <div
-                    key={att.id}
-                    className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white/[0.08] border border-white/15 text-xs text-white max-w-[260px]"
-                  >
-                    {att.previewUrl ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={att.previewUrl}
-                        alt={att.name}
-                        onClick={() => setPreviewAttachment(att)}
-                        className="w-8 h-8 rounded-lg object-cover cursor-pointer hover:opacity-80 transition-opacity shrink-0"
-                      />
-                    ) : (
-                      getAttachmentIcon(att)
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate font-medium text-[11px]">
-                        {att.name}
-                      </div>
-                      <div className="text-[10px] text-slate-400">
-                        {att.lineCount
-                          ? `${att.lineCount} lines • ${formatFileSize(att.size)}`
-                          : formatFileSize(att.size)}
-                      </div>
-                    </div>
-                    {att.content && (
-                      <button
-                        type="button"
-                        onClick={() => setPreviewAttachment(att)}
-                        className="p-1 rounded text-slate-400 hover:text-white transition-colors cursor-pointer"
-                        title="View snippet content"
-                      >
-                        <Eye className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {message.content && (
-              <div className="rounded-2xl rounded-tr-sm px-4 py-3 bg-gradient-to-br from-indigo-600 to-indigo-700 text-white shadow-md shadow-indigo-950/30 text-sm leading-relaxed whitespace-pre-wrap break-words">
-                {message.content}
-              </div>
-            )}
-
-            <div className="mt-1 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-              <button
-                type="button"
-                onClick={handleCopyMessage}
-                className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 p-1 rounded cursor-pointer"
-                title="Copy prompt"
-              >
-                {copiedMessage ? (
-                  <Check className="w-3 h-3 text-emerald-400" />
-                ) : (
-                  <Copy className="w-3 h-3" />
-                )}
-                <span>{copiedMessage ? 'Copied' : 'Copy'}</span>
-              </button>
-            </div>
+      <div className="flex flex-col items-end gap-2 py-3">
+        {message.attachments && message.attachments.length > 0 && (
+          <div className="flex max-w-full flex-wrap justify-end gap-1.5">
+            {message.attachments.map((attachment) => (
+              <AttachmentChip
+                key={attachment.id}
+                attachment={attachment}
+                onPreview={() => setPreview(attachment)}
+              />
+            ))}
           </div>
-          <div className="w-8 h-8 rounded-xl bg-indigo-600/30 border border-indigo-400/30 flex items-center justify-center shrink-0 text-indigo-300">
-            <User className="w-4 h-4" />
-          </div>
-        </div>
+        )}
 
-        {/* Attachment Lightbox / Modal */}
-        {previewAttachment && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-150">
-            <div className="relative w-full max-w-2xl max-h-[80vh] rounded-3xl bg-[#0e121d] border border-white/10 shadow-2xl shadow-black/90 p-5 flex flex-col text-slate-200">
-              <div className="flex items-center justify-between pb-3 border-b border-white/[0.08] mb-3">
-                <div className="flex items-center gap-2">
-                  {getAttachmentIcon(previewAttachment)}
-                  <span className="font-semibold text-white text-sm">
-                    {previewAttachment.name}
-                  </span>
-                  <span className="text-[10px] text-slate-400 px-2 py-0.5 rounded bg-white/5">
-                    {formatFileSize(previewAttachment.size)}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setPreviewAttachment(null)}
-                  className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              {previewAttachment.type === 'image' && previewAttachment.previewUrl ? (
-                <div className="flex-1 overflow-auto flex items-center justify-center p-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={previewAttachment.previewUrl}
-                    alt={previewAttachment.name}
-                    className="max-h-[60vh] max-w-full rounded-xl object-contain"
-                  />
-                </div>
-              ) : (
-                <div className="flex-1 overflow-auto rounded-xl bg-[#08090d] border border-white/[0.06] p-4 text-xs font-mono text-slate-300 leading-relaxed whitespace-pre">
-                  {previewAttachment.content || '(No content)'}
-                </div>
-              )}
+        {message.content && (
+          <div className="group flex max-w-[88%] items-start gap-1.5 sm:max-w-[80%]">
+            <IconButton
+              label="Copy message"
+              size="sm"
+              onClick={copyMessage}
+              className="mt-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+            >
+              {copied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
+            </IconButton>
+            <div className="min-w-0 whitespace-pre-wrap break-words rounded-[var(--radius-md)] bg-[var(--fill)] px-3.5 py-2.5 text-[15px] leading-relaxed text-[var(--text)]">
+              {message.content}
             </div>
           </div>
         )}
+
+        {message.memoryWrites && message.memoryWrites.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-1.5">
+            {message.memoryWrites.map((write) => (
+              <span
+                key={write.id}
+                className="inline-flex max-w-[20rem] items-center gap-1.5 rounded-[var(--radius)] border border-[var(--border)] px-2 py-1 text-[11px] text-[var(--text-muted)]"
+                title={write.content}
+              >
+                <Brain className="h-3 w-3 shrink-0" />
+                <span className="truncate">Remembered: {write.content}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        {preview && <AttachmentPreview attachment={preview} onClose={() => setPreview(null)} />}
       </div>
     );
   }
 
-  // Assistant Message
+  /* --- assistant --- */
+  const modelName = getModelInfo(message.model || '')?.name;
+  const hasBody = prose.length > 0;
+
   return (
-    <div className="w-full flex justify-start my-3 px-2 sm:px-0 group">
-      <div className="flex gap-3 max-w-[95%] sm:max-w-3xl">
-        <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shrink-0 shadow-lg shadow-indigo-500/20 text-white font-bold text-xs mt-0.5">
-          <Sparkles className="w-4 h-4" />
+    <div className="group py-3">
+      {(modelName || timestamp) && (
+        <div className="mb-1.5 flex items-center gap-2 text-[11px] text-[var(--text-muted)]">
+          {modelName && <span>{modelName}</span>}
+          {timestamp && <span className="tabular">{timestamp}</span>}
         </div>
+      )}
 
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-xs font-semibold text-slate-300">
-              {modelDisplayName}
-            </span>
-            {message.createdAt && (
-              <span className="text-[10px] text-slate-500">
-                {new Date(message.createdAt).toLocaleTimeString([], {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </span>
-            )}
-          </div>
-
-          {/* Collapsible Thinking / Reasoning Process */}
-          {message.reasoning && (
-            <div className="mb-3 rounded-2xl bg-white/[0.03] border border-white/[0.08] overflow-hidden text-xs">
-              <button
-                type="button"
-                onClick={() => setIsThinkingExpanded(!isThinkingExpanded)}
-                className="w-full flex items-center justify-between px-3.5 py-2 bg-white/[0.02] hover:bg-white/[0.05] text-indigo-300 font-medium cursor-pointer transition-colors"
-              >
-                <span className="flex items-center gap-2">
-                  <Brain className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>Thinking Process</span>
-                </span>
-                <ChevronDown
-                  className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
-                    isThinkingExpanded ? 'rotate-180' : ''
-                  }`}
-                />
-              </button>
-              {isThinkingExpanded && (
-                <div className="p-3.5 border-t border-white/[0.06] text-slate-300 font-mono text-[11px] leading-relaxed whitespace-pre-wrap max-h-60 overflow-y-auto bg-black/20">
-                  {message.reasoning}
-                </div>
-              )}
+      {message.reasoning && (
+        <div className="mb-3 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)]">
+          <button
+            type="button"
+            onClick={() => setReasoningOpen((prev) => !prev)}
+            className="flex w-full items-center gap-2 bg-[var(--bg-subtle)] px-3 py-1.5 text-[12px] text-[var(--text-secondary)] hover:bg-[var(--fill)]"
+          >
+            <Brain className="h-3.5 w-3.5" />
+            <span className="flex-1 text-left">Reasoning</span>
+            <ChevronRight className={cx('h-3.5 w-3.5 transition-transform', reasoningOpen && 'rotate-90')} />
+          </button>
+          {reasoningOpen && (
+            <div className="max-h-72 overflow-y-auto whitespace-pre-wrap border-t border-[var(--border)] p-3 font-mono text-[12px] leading-relaxed text-[var(--text-secondary)]">
+              {message.reasoning}
             </div>
           )}
+        </div>
+      )}
 
-          {/* Artifact Project Card if generated */}
-          {message.artifactSummary && (
-            <div className="mb-3 p-3.5 rounded-2xl bg-gradient-to-r from-indigo-950/40 via-[#0e121d] to-purple-950/40 border border-indigo-500/30 flex items-center justify-between gap-3 shadow-lg shadow-indigo-950/30">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-9 h-9 rounded-xl bg-indigo-600/20 border border-indigo-400/30 flex items-center justify-center text-indigo-300 shrink-0">
-                  <FolderArchive className="w-4 h-4 text-indigo-400" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
-                    <span>{message.artifactSummary.title || message.artifactSummary.name}</span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono">
-                      {message.artifactSummary.fileCount} files
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-slate-400">
-                    Project generated and loaded in workspace
-                  </div>
-                </div>
-              </div>
-              {onOpenArtifact && (
-                <button
-                  type="button"
-                  onClick={onOpenArtifact}
-                  className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-950/40 transition-colors cursor-pointer"
-                >
-                  <span>Open Workspace</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          )}
-
-          <div className="markdown-body text-sm text-slate-200 leading-relaxed break-words">
-            {(() => {
-              let cleaned = message.content
-                .replace(/<raizel_artifact[\s\S]*?<\/raizel_artifact>/gi, '')
-                .replace(/<raizel_operation[\s\S]*?<\/raizel_operation>/gi, '');
-              // Clean unclosed in-progress tags
-              cleaned = cleaned
-                .replace(/<raizel_artifact[\s\S]*$/gi, '')
-                .replace(/<raizel_operation[\s\S]*$/gi, '')
-                .trim();
-
-              if (!cleaned && (message.hasArtifact || message.artifactSummary || message.content.includes('<raizel_'))) {
-                return (
-                  <p className="text-xs text-indigo-300/80 italic flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-pulse" />
-                    <span>Project structure generated directly into the Workspace panel.</span>
-                  </p>
-                );
-              }
-
-              return (
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
-                  components={{
-                    pre({ children }) {
-                      return <>{children}</>;
-                    },
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    code({ className, children, ...props }: any) {
-                      const match = /language-(\w+)/.exec(className || '');
-                      const rawCode = extractText(children);
-                      const isMultiLine = rawCode.includes('\n');
-
-                      if (match || isMultiLine) {
-                        return (
-                          <CodeBlock
-                            language={match ? match[1] : ''}
-                            rawCode={rawCode}
-                          >
-                            {children}
-                          </CodeBlock>
-                        );
-                      }
-                      return (
-                        <code
-                          className="px-1.5 py-0.5 rounded bg-white/[0.08] text-indigo-200 font-mono text-[12px] border border-white/[0.06]"
-                          {...props}
-                        >
-                          {children}
-                        </code>
-                      );
-                    },
-                  }}
-                >
-                  {cleaned || message.content}
-                </ReactMarkdown>
-              );
-            })()}
-          </div>
-
-          <div className="mt-2 flex items-center gap-3 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button
-              type="button"
-              onClick={handleCopyMessage}
-              className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1.5 px-2 py-1 rounded-md hover:bg-white/[0.05] transition-colors cursor-pointer"
-              title="Copy message"
+      {message.toolCalls && message.toolCalls.length > 0 && (
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {message.toolCalls.map((call, index) => (
+            <span
+              key={`${call.tool}-${index}`}
+              className="inline-flex items-center gap-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)]"
             >
-              {copiedMessage ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400 font-medium">Copied</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>Copy</span>
-                </>
-              )}
-            </button>
-          </div>
+              <Search className="h-3 w-3" />
+              <span className="font-mono">{call.tool}</span>
+              <span className="max-w-[12rem] truncate text-[var(--text-muted)]">{call.target}</span>
+              {!call.ok && <span className="text-[var(--danger)]">failed</span>}
+            </span>
+          ))}
         </div>
-      </div>
+      )}
+
+      {hasBody ? (
+        <div className="prose-body">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeHighlight]}
+            components={{
+              pre: ({ children }) => <>{children}</>,
+              table: ({ children }) => (
+                <div className="table-scroll">
+                  <table>{children}</table>
+                </div>
+              ),
+              a: ({ children, ...props }) => (
+                <a {...props} target="_blank" rel="noopener noreferrer">
+                  {children}
+                </a>
+              ),
+              code: ({ className, children, ...props }) => {
+                const match = /language-(\w+)/.exec(className || '');
+                const raw = nodeToText(children);
+                if (match || raw.includes('\n')) {
+                  return (
+                    <CodeBlock language={match?.[1] ?? ''} raw={raw.replace(/\n$/, '')}>
+                      {children}
+                    </CodeBlock>
+                  );
+                }
+                return (
+                  <code
+                    className="rounded-[var(--radius-sm)] bg-[var(--fill)] px-1 py-0.5 text-[var(--text)]"
+                    {...props}
+                  >
+                    {children}
+                  </code>
+                );
+              },
+            }}
+          >
+            {prose}
+          </ReactMarkdown>
+        </div>
+      ) : (
+        !isStreaming &&
+        (message.changes?.length ? null : (
+          <p className="text-[13px] italic text-[var(--text-muted)]">No text in this response.</p>
+        ))
+      )}
+
+      {isStreaming && (
+        <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 bg-[var(--text)] animate-dot" />
+      )}
+
+      {message.changes && message.changes.length > 0 && (
+        <ChangeList changes={message.changes} onOpenFile={onOpenFile} />
+      )}
+
+      {message.artifactSummary && (
+        <button
+          type="button"
+          onClick={onOpenWorkspace}
+          className="mt-3 flex w-full items-center gap-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--bg-subtle)] px-3.5 py-3 text-left transition-colors hover:bg-[var(--fill)]"
+        >
+          <PanelRight className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-medium text-[var(--text)]">
+              {message.artifactSummary.title || message.artifactSummary.name}
+            </span>
+            <span className="block text-[12px] text-[var(--text-muted)]">
+              {message.artifactSummary.fileCount} files in the workspace
+            </span>
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0 text-[var(--text-muted)]" />
+        </button>
+      )}
+
+      {message.memoryWrites && message.memoryWrites.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {message.memoryWrites.map((write) => (
+            <Badge key={write.id}>
+              <Brain className="h-3 w-3" />
+              <span className="max-w-[18rem] truncate">Remembered: {write.content}</span>
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {!isStreaming && hasBody && (
+        <div className="mt-2 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <IconButton label={copied ? 'Copied' : 'Copy response'} size="sm" onClick={copyMessage}>
+            {copied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
+          </IconButton>
+        </div>
+      )}
     </div>
   );
 };
+
+/* ------------------------------------------------------------------ */
+/* Attachment preview                                                  */
+/* ------------------------------------------------------------------ */
+
+const AttachmentPreview: React.FC<{ attachment: FileAttachment; onClose: () => void }> = ({
+  attachment,
+  onClose,
+}) => (
+  <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="absolute inset-0 bg-[var(--bg-overlay)]" onClick={onClose} />
+    <div className="relative flex max-h-[85dvh] w-full max-w-2xl flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-raised)] shadow-[var(--shadow-lg)]">
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
+        <div className="min-w-0">
+          <p className="truncate text-[13px] font-medium text-[var(--text)]">{attachment.name}</p>
+          <p className="text-[12px] text-[var(--text-muted)]">
+            {formatFileSize(attachment.size)}
+            {attachment.lineCount ? ` · ${attachment.lineCount} lines` : ''}
+          </p>
+        </div>
+        <IconButton label="Close preview" size="sm" onClick={onClose}>
+          <ChevronRight className="h-4 w-4 rotate-90" />
+        </IconButton>
+      </div>
+
+      {attachment.statusDetail && (
+        <p
+          className={cx(
+            'border-b border-[var(--border)] px-4 py-2 text-[12px]',
+            attachment.status === 'failed' ? 'text-[var(--danger)]' : 'text-[var(--text-muted)]'
+          )}
+        >
+          {attachment.statusDetail}
+        </p>
+      )}
+
+      <div className="flex-1 overflow-auto">
+        {attachment.type === 'image' && attachment.previewUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={attachment.previewUrl} alt={attachment.name} className="mx-auto max-h-[60dvh] object-contain p-4" />
+        ) : attachment.type === 'zip' ? (
+          <ul className="p-4 font-mono text-[12px] text-[var(--text-secondary)]">
+            {(attachment.extractedFiles ?? []).slice(0, 500).map((path) => (
+              <li key={path} className="truncate">
+                {path}
+              </li>
+            ))}
+          </ul>
+        ) : attachment.content ? (
+          <pre className="code-surface whitespace-pre-wrap p-4 text-[var(--text-secondary)]">
+            {attachment.content}
+          </pre>
+        ) : (
+          <p className="p-6 text-center text-[13px] text-[var(--text-muted)]">
+            Nothing was extracted from this file.
+          </p>
+        )}
+      </div>
+    </div>
+  </div>
+);

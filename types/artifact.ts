@@ -1,10 +1,24 @@
+import type { ProjectManifest, ProjectPlan } from './project';
+
 export interface ArtifactFile {
-  path: string;            // Normalized path, e.g. "app/page.tsx"
-  name: string;            // Basename, e.g. "page.tsx"
-  content: string;         // File content text
-  language: string;        // Language identifier, e.g. "tsx", "css", "json"
-  previousContent?: string;// Previous content before AI update (for diff)
-  isModified?: boolean;    // Flagged if modified in the current session
+  /** Normalized POSIX-relative path, e.g. "app/page.tsx". */
+  path: string;
+  name: string;
+  content: string;
+  language: string;
+  /** Content before the most recent change, used to render diffs. */
+  previousContent?: string;
+  /** True when the current session changed this file. */
+  isModified?: boolean;
+  /** Set when the file came from an import and was edited by the user, not the AI. */
+  editedByUser?: boolean;
+  /**
+   * False for binary/undecodable files that exist in the project but whose
+   * contents were never read. `content` is empty and must not be presented
+   * as the real file.
+   */
+  isReadable?: boolean;
+  unreadableReason?: string;
   updatedAt: number;
 }
 
@@ -15,13 +29,10 @@ export interface FileTreeNode {
   children?: FileTreeNode[];
   language?: string;
   isModified?: boolean;
+  isReadable?: boolean;
 }
 
-export type ArtifactOperationType =
-  | 'create_file'
-  | 'update_file'
-  | 'delete_file'
-  | 'rename_file';
+export type ArtifactOperationType = 'create_file' | 'update_file' | 'delete_file' | 'rename_file';
 
 export interface ArtifactOperation {
   operation: ArtifactOperationType;
@@ -29,41 +40,48 @@ export interface ArtifactOperation {
   newPath?: string;
   content?: string;
   language?: string;
+  /** Why the model made this change. Surfaced in the changes panel. */
+  reason?: string;
 }
 
-export interface ProjectBuildStep {
-  id: string;
-  label: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  detail?: string;
+/** Result of applying one operation, so the UI reflects what actually happened. */
+export interface AppliedOperation {
+  operation: ArtifactOperationType;
+  path: string;
+  newPath?: string;
+  status: 'applied' | 'skipped';
+  skipReason?: string;
+  addedLines: number;
+  removedLines: number;
+  reason?: string;
 }
 
-export interface ProjectBuildState {
-  isBuilding: boolean;
-  projectName?: string;
-  currentStepIndex: number;
-  steps: ProjectBuildStep[];
-}
+export type ArtifactOrigin = 'generated' | 'imported' | 'template';
 
 export interface ArtifactProject {
   id: string;
   conversationId: string;
-  name: string;            // e.g. "portfolio"
-  title: string;           // Display title, e.g. "Modern Portfolio Website"
+  name: string;
+  title: string;
   description?: string;
   files: ArtifactFile[];
-  activeFilePath: string;  // Path of currently viewed file
+  activeFilePath: string;
   createdAt: number;
   updatedAt: number;
   version: number;
-  buildState?: ProjectBuildState;
+  origin?: ArtifactOrigin;
+  /** Derived understanding of the project; rebuilt whenever files change. */
+  manifest?: ProjectManifest;
+  /** Multi-phase plan for large builds. */
+  plan?: ProjectPlan;
+  /** Operations applied in the most recent assistant turn. */
+  lastChanges?: AppliedOperation[];
 }
 
 export interface ProjectTemplate {
   id: string;
   name: string;
-  icon: string;
-  category: 'web' | 'backend' | 'cybersecurity' | 'python' | 'dashboard';
+  category: 'web' | 'backend' | 'python' | 'security';
   description: string;
-  project: Omit<ArtifactProject, 'id' | 'conversationId' | 'createdAt' | 'updatedAt' | 'version'>;
+  project: Pick<ArtifactProject, 'name' | 'title' | 'description' | 'files' | 'activeFilePath'>;
 }

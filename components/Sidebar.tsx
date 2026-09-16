@@ -1,301 +1,287 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Plus,
-  MessageSquare,
-  Trash2,
-  Edit2,
-  Check,
-  X,
   Search,
   Settings,
   Info,
-  Sparkles,
-  PanelLeftClose,
+  Trash2,
+  Pencil,
+  Check,
+  X,
+  PanelLeft,
+  Brain,
 } from 'lucide-react';
-import { Conversation } from '@/types/chat';
+import type { Conversation } from '@/types/chat';
+import { Button, EmptyState, IconButton, cx } from './ui/primitives';
 
 interface SidebarProps {
   conversations: Conversation[];
-  activeConversationId: string | null;
-  onSelectConversation: (id: string) => void;
+  activeId: string | null;
+  memoryCount: number;
+  onSelect: (id: string) => void;
   onNewChat: () => void;
-  onDeleteConversation: (id: string) => void;
-  onRenameConversation: (id: string, newTitle: string) => void;
-  onOpenSettings: () => void;
+  onDelete: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  onOpenSettings: (section?: 'memory') => void;
   onOpenAbout: () => void;
-  isOpenMobile: boolean;
+  isMobileOpen: boolean;
   onCloseMobile: () => void;
+}
+
+interface Group {
+  label: string;
+  items: Conversation[];
+}
+
+function groupByRecency(conversations: Conversation[]): Group[] {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86_400_000;
+
+  const groups: Record<string, Conversation[]> = {
+    Today: [],
+    Yesterday: [],
+    'Previous 7 days': [],
+    'Previous 30 days': [],
+    Older: [],
+  };
+
+  for (const conversation of conversations) {
+    const at = conversation.updatedAt || conversation.createdAt;
+    if (at >= startOfToday) groups.Today.push(conversation);
+    else if (at >= startOfToday - day) groups.Yesterday.push(conversation);
+    else if (at >= startOfToday - 7 * day) groups['Previous 7 days'].push(conversation);
+    else if (at >= startOfToday - 30 * day) groups['Previous 30 days'].push(conversation);
+    else groups.Older.push(conversation);
+  }
+
+  return Object.entries(groups)
+    .filter(([, items]) => items.length > 0)
+    .map(([label, items]) => ({ label, items }));
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
   conversations,
-  activeConversationId,
-  onSelectConversation,
+  activeId,
+  memoryCount,
+  onSelect,
   onNewChat,
-  onDeleteConversation,
-  onRenameConversation,
+  onDelete,
+  onRename,
   onOpenSettings,
   onOpenAbout,
-  isOpenMobile,
+  isMobileOpen,
   onCloseMobile,
 }) => {
-  const [searchQuery, setSearchQuery] = useState('');
+  const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState('');
+  const [draftTitle, setDraftTitle] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
-  const startRename = (conv: Conversation, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setEditingId(conv.id);
-    setEditingTitle(conv.title);
-  };
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return conversations;
+    return conversations.filter((conversation) => {
+      if (conversation.title.toLowerCase().includes(needle)) return true;
+      // Searching message text makes history useful once it is long.
+      return conversation.messages.some((m) => m.content.toLowerCase().includes(needle));
+    });
+  }, [conversations, query]);
 
-  const handleSaveRename = (id: string, e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (editingTitle.trim()) {
-      onRenameConversation(id, editingTitle.trim());
-    }
+  const groups = useMemo(() => groupByRecency(filtered), [filtered]);
+
+  const commitRename = (id: string) => {
+    const next = draftTitle.trim();
+    if (next) onRename(id, next);
     setEditingId(null);
   };
 
-  const handleCancelRename = () => {
-    setEditingId(null);
-  };
-
-  // Filter conversations by search
-  const filteredConversations = conversations.filter((c) =>
-    c.title.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
-  // Group conversations: Today, Yesterday, Previous 7 Days, Older
-  const now = new Date();
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
-  const startOf7Days = startOfToday - 7 * 24 * 60 * 60 * 1000;
-
-  const todayList: Conversation[] = [];
-  const yesterdayList: Conversation[] = [];
-  const past7DaysList: Conversation[] = [];
-  const olderList: Conversation[] = [];
-
-  filteredConversations.forEach((conv) => {
-    const timestamp = conv.updatedAt || conv.createdAt;
-    if (timestamp >= startOfToday) {
-      todayList.push(conv);
-    } else if (timestamp >= startOfYesterday) {
-      yesterdayList.push(conv);
-    } else if (timestamp >= startOf7Days) {
-      past7DaysList.push(conv);
-    } else {
-      olderList.push(conv);
-    }
-  });
-
-  const renderGroup = (title: string, list: Conversation[]) => {
-    if (list.length === 0) return null;
-
-    return (
-      <div className="mb-4">
-        <h4 className="px-3 text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-          {title}
-        </h4>
-        <div className="space-y-1">
-          {list.map((conv) => {
-            const isActive = conv.id === activeConversationId;
-            const isEditing = conv.id === editingId;
-
-            return (
-              <div
-                key={conv.id}
-                onClick={() => {
-                  if (!isEditing) {
-                    onSelectConversation(conv.id);
-                    onCloseMobile();
-                  }
-                }}
-                className={`group relative flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all duration-150 cursor-pointer ${
-                  isActive
-                    ? 'bg-indigo-600/20 text-white border border-indigo-500/30'
-                    : 'text-slate-300 hover:bg-white/[0.04] hover:text-white border border-transparent'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0 flex-1 pr-2">
-                  <MessageSquare
-                    className={`w-4 h-4 shrink-0 ${
-                      isActive ? 'text-indigo-400' : 'text-slate-500 group-hover:text-slate-400'
-                    }`}
-                  />
-                  {isEditing ? (
-                    <form
-                      onSubmit={(e) => handleSaveRename(conv.id, e)}
-                      onClick={(e) => e.stopPropagation()}
-                      className="flex-1 flex items-center gap-1 min-w-0"
-                    >
-                      <input
-                        type="text"
-                        value={editingTitle}
-                        onChange={(e) => setEditingTitle(e.target.value)}
-                        autoFocus
-                        className="w-full bg-black/50 px-2 py-0.5 rounded text-xs text-white border border-indigo-500 focus:outline-none"
-                      />
-                      <button
-                        type="submit"
-                        className="p-1 text-emerald-400 hover:text-emerald-300 cursor-pointer"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleCancelRename}
-                        className="p-1 text-slate-400 hover:text-slate-300 cursor-pointer"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </form>
-                  ) : (
-                    <span className="truncate text-xs sm:text-sm">{conv.title}</span>
-                  )}
-                </div>
-
-                {!isEditing && (
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      type="button"
-                      onClick={(e) => startRename(conv, e)}
-                      className="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-slate-200 cursor-pointer"
-                      title="Rename chat"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteConversation(conv.id);
-                      }}
-                      className="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-rose-400 cursor-pointer"
-                      title="Delete chat"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    );
-  };
-
-  const sidebarContent = (
-    <div className="flex flex-col h-full bg-[#0a0c13] border-r border-white/[0.08] text-slate-200 select-none">
-      {/* Brand Header */}
-      <div className="p-4 border-b border-white/[0.06] flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-purple-500 flex items-center justify-center shadow-lg shadow-indigo-600/30">
-            <Sparkles className="w-4 h-4 text-white" />
-          </div>
-          <div>
-            <h1 className="font-extrabold text-base tracking-wider text-white">
-              RAIZEL <span className="text-indigo-400">AI</span>
-            </h1>
-            <p className="text-[10px] text-slate-400 leading-tight">
-              Your AI. Your Ideas.
-            </p>
-          </div>
-        </div>
-
-        {/* Mobile close button */}
-        <button
-          type="button"
-          onClick={onCloseMobile}
-          className="md:hidden p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white cursor-pointer"
-        >
-          <PanelLeftClose className="w-5 h-5" />
-        </button>
+  const content = (
+    <div className="flex h-full flex-col bg-[var(--bg-subtle)] border-r border-[var(--border)]">
+      <div className="flex items-center justify-between gap-2 px-3 h-14 shrink-0">
+        <span className="text-[13px] font-semibold tracking-[0.14em] text-[var(--text)] uppercase pl-1">
+          Raizel
+        </span>
+        <IconButton label="Close menu" onClick={onCloseMobile} className="md:hidden" size="sm">
+          <PanelLeft className="h-4 w-4" />
+        </IconButton>
       </div>
 
-      {/* New Chat Button */}
-      <div className="p-3">
-        <button
-          type="button"
-          onClick={() => {
-            onNewChat();
-            onCloseMobile();
-          }}
-          className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-md shadow-indigo-600/25 transition-all duration-150 cursor-pointer group"
-        >
-          <Plus className="w-4 h-4 group-hover:rotate-90 transition-transform duration-200" />
-          <span>New Chat</span>
-        </button>
+      <div className="px-3 pb-2 shrink-0">
+        <Button variant="secondary" size="md" className="w-full justify-start" onClick={onNewChat}>
+          <Plus className="h-4 w-4" />
+          New chat
+        </Button>
       </div>
 
-      {/* Search Bar */}
       {conversations.length > 0 && (
-        <div className="px-3 pb-2">
+        <div className="px-3 pb-2 shrink-0">
           <div className="relative">
-            <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
             <input
-              type="text"
-              placeholder="Search chats..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 bg-white/[0.03] hover:bg-white/[0.05] focus:bg-white/[0.06] border border-white/[0.06] rounded-xl text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/40 transition-colors"
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search chats"
+              className="h-8 w-full rounded-[var(--radius)] border border-transparent bg-[var(--fill)] pl-8 pr-2.5 text-[13px] text-[var(--text)] placeholder:text-[var(--text-muted)] outline-none focus:border-[var(--border-strong)] focus:bg-[var(--bg)]"
             />
           </div>
         </div>
       )}
 
-      {/* Chat History List */}
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1">
+      <nav className="flex-1 overflow-y-auto px-2 pb-2">
         {conversations.length === 0 ? (
-          <div className="text-center py-10 px-4 text-slate-500 text-xs">
-            <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-30" />
-            <p>No conversations yet.</p>
-            <p className="text-[11px] text-slate-600 mt-1">
-              Start typing below to begin.
-            </p>
-          </div>
-        ) : filteredConversations.length === 0 ? (
-          <div className="text-center py-8 text-slate-500 text-xs">
-            No chats matching &quot;{searchQuery}&quot;
-          </div>
+          <EmptyState title="No chats yet" description="Your conversations will appear here." />
+        ) : filtered.length === 0 ? (
+          <p className="px-3 py-8 text-center text-[13px] text-[var(--text-muted)]">
+            Nothing matches that search.
+          </p>
         ) : (
-          <>
-            {renderGroup('Today', todayList)}
-            {renderGroup('Yesterday', yesterdayList)}
-            {renderGroup('Previous 7 Days', past7DaysList)}
-            {renderGroup('Older', olderList)}
-          </>
+          groups.map((group) => (
+            <section key={group.label} className="mb-3">
+              <h4 className="px-2 pb-1 pt-2 text-[11px] font-medium text-[var(--text-muted)]">
+                {group.label}
+              </h4>
+              <ul>
+                {group.items.map((conversation) => {
+                  const isActive = conversation.id === activeId;
+                  const isEditing = editingId === conversation.id;
+                  const isConfirmingDelete = pendingDelete === conversation.id;
+
+                  if (isEditing) {
+                    return (
+                      <li key={conversation.id} className="px-1 py-0.5">
+                        <div className="flex items-center gap-1 rounded-[var(--radius)] bg-[var(--bg)] px-1.5 py-1 ring-1 ring-[var(--accent)]">
+                          <input
+                            autoFocus
+                            value={draftTitle}
+                            onChange={(event) => setDraftTitle(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') commitRename(conversation.id);
+                              if (event.key === 'Escape') setEditingId(null);
+                            }}
+                            className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text)] outline-none"
+                          />
+                          <IconButton
+                            label="Save name"
+                            size="sm"
+                            onClick={() => commitRename(conversation.id)}
+                          >
+                            <Check className="h-3.5 w-3.5" />
+                          </IconButton>
+                          <IconButton label="Cancel" size="sm" onClick={() => setEditingId(null)}>
+                            <X className="h-3.5 w-3.5" />
+                          </IconButton>
+                        </div>
+                      </li>
+                    );
+                  }
+
+                  return (
+                    <li key={conversation.id} className="px-1 py-0.5">
+                      <div
+                        className={cx(
+                          'group flex items-center gap-1 rounded-[var(--radius)] pl-2.5 pr-1',
+                          isActive ? 'bg-[var(--fill-active)]' : 'hover:bg-[var(--fill)]'
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelect(conversation.id);
+                            onCloseMobile();
+                          }}
+                          className="min-w-0 flex-1 truncate py-2 text-left text-[13px] text-[var(--text)]"
+                        >
+                          {conversation.title}
+                        </button>
+
+                        {isConfirmingDelete ? (
+                          <span className="flex items-center gap-0.5">
+                            <IconButton
+                              label="Confirm delete"
+                              size="sm"
+                              className="text-[var(--danger)]"
+                              onClick={() => {
+                                onDelete(conversation.id);
+                                setPendingDelete(null);
+                              }}
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                            </IconButton>
+                            <IconButton
+                              label="Cancel delete"
+                              size="sm"
+                              onClick={() => setPendingDelete(null)}
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </IconButton>
+                          </span>
+                        ) : (
+                          <span
+                            className={cx(
+                              'flex items-center gap-0.5 transition-opacity',
+                              isActive
+                                ? 'opacity-100'
+                                : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
+                            )}
+                          >
+                            <IconButton
+                              label="Rename chat"
+                              size="sm"
+                              onClick={() => {
+                                setEditingId(conversation.id);
+                                setDraftTitle(conversation.title);
+                              }}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </IconButton>
+                            <IconButton
+                              label="Delete chat"
+                              size="sm"
+                              onClick={() => setPendingDelete(conversation.id)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </IconButton>
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))
         )}
-      </div>
+      </nav>
 
-      {/* Bottom Actions */}
-      <div className="p-3 border-t border-white/[0.06] space-y-1 bg-[#090b10]">
+      <div className="shrink-0 border-t border-[var(--border)] p-2">
         <button
           type="button"
-          onClick={() => {
-            onOpenSettings();
-            onCloseMobile();
-          }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-white/[0.05] transition-colors cursor-pointer"
+          onClick={() => onOpenSettings('memory')}
+          className="flex w-full items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-[13px] text-[var(--text-secondary)] hover:bg-[var(--fill)] hover:text-[var(--text)]"
         >
-          <Settings className="w-4 h-4 text-slate-400" />
-          <span>Settings</span>
+          <Brain className="h-4 w-4" />
+          <span className="flex-1 text-left">Memory</span>
+          <span className="tabular text-[12px] text-[var(--text-muted)]">{memoryCount}</span>
         </button>
-
         <button
           type="button"
-          onClick={() => {
-            onOpenAbout();
-            onCloseMobile();
-          }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-white/[0.05] transition-colors cursor-pointer"
+          onClick={() => onOpenSettings()}
+          className="flex w-full items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-[13px] text-[var(--text-secondary)] hover:bg-[var(--fill)] hover:text-[var(--text)]"
         >
-          <Info className="w-4 h-4 text-slate-400" />
-          <span>About RAIZEL AI</span>
+          <Settings className="h-4 w-4" />
+          Settings
+        </button>
+        <button
+          type="button"
+          onClick={onOpenAbout}
+          className="flex w-full items-center gap-2.5 rounded-[var(--radius)] px-2.5 py-2 text-[13px] text-[var(--text-secondary)] hover:bg-[var(--fill)] hover:text-[var(--text)]"
+        >
+          <Info className="h-4 w-4" />
+          About
         </button>
       </div>
     </div>
@@ -303,20 +289,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <>
-      {/* Desktop Sidebar (Permanent) */}
-      <aside className="hidden md:block w-64 lg:w-72 h-screen shrink-0 sticky top-0 z-30">
-        {sidebarContent}
-      </aside>
+      <aside className="hidden md:block w-[260px] shrink-0 h-full">{content}</aside>
 
-      {/* Mobile Drawer (Overlay) */}
-      {isOpenMobile && (
+      {isMobileOpen && (
         <div className="md:hidden fixed inset-0 z-50 flex">
-          <div
-            className="fixed inset-0 bg-black/70 backdrop-blur-sm transition-opacity"
-            onClick={onCloseMobile}
-          />
-          <div className="relative w-4/5 max-w-xs h-full z-10 shadow-2xl animate-in slide-in-from-left duration-200">
-            {sidebarContent}
+          <div className="absolute inset-0 bg-[var(--bg-overlay)] animate-fade-in" onClick={onCloseMobile} />
+          <div className="relative z-10 h-full w-[84%] max-w-[300px] shadow-[var(--shadow-lg)] animate-slide-up">
+            {content}
           </div>
         </div>
       )}

@@ -1,225 +1,184 @@
-import { ArtifactProject, ArtifactFile } from '@/types/artifact';
-import { normalizeRelativePath } from '@/lib/zip';
-
-interface FileRelevanceScore {
-  file: ArtifactFile;
-  score: number;
-  reasons: string[];
-}
-
-// Semantic topic associations for smart context expansion
-const SEMANTIC_TOPIC_KEYWORDS: Record<string, string[]> = {
-  auth: [
-    'auth', 'login', 'logout', 'signup', 'register', 'session', 'middleware',
-    'jwt', 'token', 'user', 'dashboard', 'protect', 'oauth', 'profile', 'redirect'
-  ],
-  styling: [
-    'style', 'css', 'tailwind', 'theme', 'color', 'dark', 'light', 'hero',
-    'navbar', 'header', 'footer', 'button', 'card', 'font', 'animation', 'layout'
-  ],
-  api: [
-    'api', 'route', 'endpoint', 'fetch', 'backend', 'server', 'handler',
-    'controller', 'request', 'response', 'crud'
-  ],
-  data: [
-    'db', 'database', 'prisma', 'sql', 'model', 'schema', 'table', 'migration',
-    'query', 'entity', 'store', 'state', 'context'
-  ],
-  security: [
-    'security', 'owasp', 'audit', 'vuln', 'sanitiz', 'cors', 'header',
-    'xss', 'csrf', 'rate-limit', 'encrypt', 'hash', 'secret'
-  ],
-  test: [
-    'test', 'spec', 'jest', 'vitest', 'unit', 'mock', 'assert', 'fixture'
-  ],
-};
+import type { ArtifactProject } from '@/types/artifact';
+import type { ProjectIndex } from '@/types/project';
+import type { MemoryItem } from '@/types/memory';
+import { buildProjectIndex, formatFileTreeForModel, formatManifestForModel } from '@/lib/project/indexer';
+import { retrieveContext, formatSlicesForModel } from '@/lib/project/retrieval';
+import { formatMemoriesForModel, retrieveMemories, type RetrievedMemory } from '@/lib/memory/engine';
 
 /**
- * Extracts dependency import paths from file content.
+ * Assembles the system context for one request.
+ *
+ * Order matters: durable memory first (it shapes tone and defaults), then the
+ * project manifest (what the codebase *is*), then the file tree (what exists),
+ * then only the file bodies that scored high enough to earn their tokens.
  */
-function extractImportPaths(content: string): string[] {
-  const paths: string[] = [];
-  const regex = /(?:import\s+(?:[\w*\s{},]+from\s+)?['"]([^'"]+)['"]|require\s*\(\s*['"]([^'"]+)['"]\s*\))/g;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const raw = match[1] || match[2];
-    if (raw && raw.startsWith('.')) {
-      paths.push(raw);
-    }
-  }
-  return paths;
+
+export interface BuildContextInput {
+  project: ArtifactProject | null;
+  /** Prebuilt index; rebuilt from project files when absent. */
+  index?: ProjectIndex | null;
+  userMessage: string;
+  memories: MemoryItem[];
+  memoryLimit: number;
+  memoryEnabled: boolean;
+  allowFileRequests: boolean;
+  /** Paths already sent this turn (e.g. resolved tool calls). */
+  alreadyIncluded?: string[];
+  budgetChars?: number;
 }
 
-/**
- * Intelligently scores and ranks project files based on the user's prompt,
- * active file, manual user edits, and semantic relationships.
- */
-export function scoreProjectFiles(
-  project: ArtifactProject,
-  userPrompt: string
-): FileRelevanceScore[] {
-  const files = project.files || [];
-  const lowerPrompt = userPrompt.toLowerCase();
-  const scored: FileRelevanceScore[] = [];
-
-  // Identify active semantic topics from user prompt
-  const activeTopics = new Set<string>();
-  for (const [topic, keywords] of Object.entries(SEMANTIC_TOPIC_KEYWORDS)) {
-    for (const kw of keywords) {
-      if (lowerPrompt.includes(kw)) {
-        activeTopics.add(topic);
-        break;
-      }
-    }
-  }
-
-  // Identify files imported by active file
-  const activeFile = files.find((f) => f.path === project.activeFilePath);
-  const activeImports = activeFile ? extractImportPaths(activeFile.content || '') : [];
-
-  for (const file of files) {
-    const normPath = normalizeRelativePath(file.path);
-    const fileName = file.name || normPath.split('/').pop() || normPath;
-    const lowerNorm = normPath.toLowerCase();
-    const lowerName = fileName.toLowerCase();
-
-    let score = 0;
-    const reasons: string[] = [];
-
-    // 1. Explicitly mentioned by user in prompt
-    if (lowerPrompt.includes(lowerName) || lowerPrompt.includes(lowerNorm)) {
-      score += 120;
-      reasons.push('Mentioned in prompt');
-    }
-
-    // 2. Active file in editor
-    if (normPath === project.activeFilePath) {
-      score += 80;
-      reasons.push('Currently active file in workspace');
-    }
-
-    // 3. User manually modified file in this session (CRITICAL: NEVER REVERT USER EDITS)
-    if (file.isModified) {
-      score += 70;
-      reasons.push('Recently edited by user');
-    }
-
-    // 4. Semantic keyword & concept match
-    for (const topic of activeTopics) {
-      const topicKeywords = SEMANTIC_TOPIC_KEYWORDS[topic] || [];
-      const matchesTopic = topicKeywords.some((kw) => lowerNorm.includes(kw));
-      if (matchesTopic) {
-        score += 50;
-        reasons.push(`Related to ${topic} context`);
-        break;
-      }
-    }
-
-    // 5. Directly imported by active file
-    if (activeImports.some((imp) => lowerNorm.includes(imp.replace(/^\.\.?\//, '').toLowerCase()))) {
-      score += 40;
-      reasons.push('Imported by active file');
-    }
-
-    // 6. Foundation & Configuration files
-    if (lowerName === 'package.json') {
-      score += 45;
-      reasons.push('Project manifest');
-    } else if (lowerName === 'tsconfig.json' || lowerName.includes('next.config') || lowerName.includes('vite.config')) {
-      score += 35;
-      reasons.push('Build configuration');
-    } else if (lowerNorm === 'app/layout.tsx' || lowerNorm === 'app/layout.jsx' || lowerName === 'index.html') {
-      score += 40;
-      reasons.push('Root application entry/layout');
-    } else if (lowerNorm.includes('types/') || lowerNorm.endsWith('.d.ts')) {
-      score += 30;
-      reasons.push('Type definitions');
-    }
-
-    scored.push({ file, score, reasons });
-  }
-
-  // Sort descending by score
-  return scored.sort((a, b) => b.score - a.score);
-}
-
-/**
- * Builds a structured, high-signal project context payload for the AI model.
- * Enforces a character budget to prevent prompt bloat while ensuring maximum
- * relevance and preserving user manual edits.
- */
-export function buildProjectContext(
-  project: ArtifactProject | null,
-  userPrompt: string,
-  maxContentChars = 48000
-): {
+export interface BuiltContext {
   hasContext: boolean;
-  systemPromptAddition?: string;
-  includedFilesCount: number;
-} {
-  if (!project || !project.files || project.files.length === 0) {
-    return { hasContext: false, includedFilesCount: 0 };
+  systemContext: string;
+  includedFiles: string[];
+  omittedFiles: string[];
+  usedMemories: RetrievedMemory[];
+  charCount: number;
+}
+
+/** Builds (or reuses) the index for a workspace project. */
+export function indexFromProject(project: ArtifactProject): ProjectIndex {
+  return buildProjectIndex(
+    project.files.map((f) => ({
+      path: f.path,
+      content: f.isReadable === false ? null : f.content,
+      bytes: f.content ? f.content.length : 0,
+      unreadableReason: f.isReadable === false ? 'binary' : undefined,
+      unreadableDetail: f.unreadableReason,
+    })),
+    project.name
+  );
+}
+
+const TOOL_INSTRUCTIONS = `FILE ACCESS
+You are seeing a selection of the project, not all of it. When you need more,
+request it and stop — the result is returned to you in the next turn:
+
+  <raizel_request tool="read_file" path="lib/auth.ts" />
+  <raizel_request tool="read_range" path="app/page.tsx" start="120" end="260" />
+  <raizel_request tool="read_multiple_files" paths="lib/db.ts,lib/schema.ts" />
+  <raizel_request tool="search_in_project" query="createSession" />
+  <raizel_request tool="list_files" path="components/" />
+
+Never guess the contents of a file you have not been shown. If a file is marked
+UNREADABLE, say so rather than inventing its contents.`;
+
+export function buildContext(input: BuildContextInput): BuiltContext {
+  const sections: string[] = [];
+  const includedFiles: string[] = [];
+  let omittedFiles: string[] = [];
+  let usedMemories: RetrievedMemory[] = [];
+
+  /* 1. Long-term memory */
+  if (input.memoryEnabled && input.memories.length > 0) {
+    usedMemories = retrieveMemories(input.memories, input.userMessage, input.memoryLimit);
+    const block = formatMemoriesForModel(usedMemories);
+    if (block) sections.push(block);
   }
 
-  const files = project.files;
-  const scoredFiles = scoreProjectFiles(project, userPrompt);
+  /* 2. Project understanding */
+  if (input.project && input.project.files.length > 0) {
+    const index = input.index ?? indexFromProject(input.project);
+    const editedByUser = input.project.files.filter((f) => f.editedByUser).map((f) => f.path);
 
-  // 1. File tree overview (always included)
-  const treeLines = files.map((f) => {
-    const isAct = f.path === project.activeFilePath ? ' [ACTIVE]' : '';
-    const isMod = f.isModified ? ' [MODIFIED_BY_USER]' : '';
-    return `- ${f.path} (${f.language || 'text'}, ${f.content.length} chars)${isAct}${isMod}`;
-  });
+    sections.push(
+      ['ACTIVE PROJECT', formatManifestForModel(index.manifest)].join('\n')
+    );
 
-  // 2. Select top files within character budget
-  const selectedFileSnippets: string[] = [];
-  let currentBudget = 0;
-  let includedCount = 0;
+    sections.push(['FILE TREE', formatFileTreeForModel(index)].join('\n'));
 
-  for (const { file, reasons } of scoredFiles) {
-    // Only include if score > 0 or if we haven't included any yet
-    if (reasons.length === 0 && includedCount >= 5) continue;
+    const retrieval = retrieveContext({
+      index,
+      query: input.userMessage,
+      activeFilePath: input.project.activeFilePath,
+      userEditedPaths: editedByUser,
+      alreadyIncluded: input.alreadyIncluded,
+      budgetChars: input.budgetChars ?? 60000,
+    });
 
-    const content = file.content || '';
-    const sliceLen = Math.min(content.length, 16000);
-    const snippetContent = content.slice(0, sliceLen) + (content.length > sliceLen ? '\n// ... [truncated for context]' : '');
+    includedFiles.push(...retrieval.slices.map((s) => s.path));
+    omittedFiles = retrieval.omitted;
 
-    const snippet = `--- File: ${file.path} (${file.language || 'code'}) [${reasons.join(', ')}] ---\n${snippetContent}`;
-
-    if (currentBudget + snippet.length > maxContentChars) {
-      break;
+    if (retrieval.slices.length > 0) {
+      sections.push(
+        [
+          `RELEVANT FILE CONTENTS (${retrieval.slices.length} of ${index.files.length} files, selected for this request)`,
+          formatSlicesForModel(retrieval),
+        ].join('\n')
+      );
     }
 
-    selectedFileSnippets.push(snippet);
-    currentBudget += snippet.length;
-    includedCount++;
+    if (editedByUser.length > 0) {
+      sections.push(
+        `USER EDITS\nThe user hand-edited these files: ${editedByUser.join(', ')}. The versions above are their current state. Build on them; do not revert them.`
+      );
+    }
+
+    const unreadable = index.files.filter((f) => f.content === null);
+    if (unreadable.length > 0) {
+      const sample = unreadable.slice(0, 10).map((f) => f.path).join(', ');
+      sections.push(
+        `UNREADABLE FILES\n${unreadable.length} file(s) exist in this project but their contents were never read (binary, too large, or undecodable): ${sample}${unreadable.length > 10 ? ', ...' : ''}. Do not describe their contents.`
+      );
+    }
+
+    if (input.allowFileRequests) sections.push(TOOL_INSTRUCTIONS);
+
+    if (input.project.plan) {
+      const plan = input.project.plan;
+      const lines = plan.phases.map(
+        (p, i) => `${i + 1}. [${p.status}] ${p.title}${p.filesTouched.length ? ` — ${p.filesTouched.length} files` : ''}`
+      );
+      sections.push(
+        [`BUILD PLAN — goal: ${plan.goal}`, ...lines, 'Work on the phase marked "active". Do not jump ahead.'].join('\n')
+      );
+    }
   }
 
-  const modifiedList = files.filter((f) => f.isModified).map((f) => f.path);
-  const userEditNotice = modifiedList.length > 0
-    ? `\nCRITICAL USER EDIT NOTICE: The user has manually edited the following files: [${modifiedList.join(', ')}]. The content shown below reflects their latest manual edits. DO NOT revert or discard their changes unless specifically instructed.`
-    : '';
-
-  const contextMessage = `══════════════════════════════════════════════════════════════
-  ACTIVE PROJECT CONTEXT: "${project.name}" (${project.title || project.name})
-══════════════════════════════════════════════════════════════
-Total Files in Workspace: ${files.length} | Project Version: ${project.version || 1}
-Active File: ${project.activeFilePath || 'None'}${userEditNotice}
-
-WORKSPACE FILE TREE:
-${treeLines.join('\n')}
-
-RELEVANT FILE CONTENTS (Selected based on user query, active file, imports, and user edits):
-${selectedFileSnippets.join('\n\n')}
-
-INSTRUCTIONS FOR AI RESPONSE:
-- When modifying this project, use <raizel_operation operation="create_file|update_file|delete_file|rename_file" path="..."> tags.
-- For "update_file", provide the 100% COMPLETE updated file content (not partial diffs).
-- Ensure all relative imports and dependencies remain valid across files.`;
+  const systemContext = sections.join('\n\n═══════════════════════════════\n\n');
 
   return {
-    hasContext: true,
-    systemPromptAddition: contextMessage,
-    includedFilesCount: includedCount,
+    hasContext: sections.length > 0,
+    systemContext,
+    includedFiles,
+    omittedFiles,
+    usedMemories,
+    charCount: systemContext.length,
   };
+}
+
+/**
+ * Renders attachments as a compact block. Attachments are attached to the
+ * message they arrived with and are *not* replayed on later turns — the
+ * caller is responsible for only passing current-turn attachments here.
+ */
+export function formatAttachmentsForModel(
+  attachments: Array<{ name: string; type: string; status: string; statusDetail?: string; content?: string; lineCount?: number; language?: string }>
+): string {
+  const blocks: string[] = [];
+
+  for (const att of attachments) {
+    if (att.type === 'image') continue; // images go through the multimodal channel
+
+    if (att.status === 'failed') {
+      blocks.push(
+        `[ATTACHMENT ${att.name} — NOT READ]\n${att.statusDetail || 'This file could not be read.'} Do not speculate about its contents.`
+      );
+      continue;
+    }
+
+    if (att.type === 'zip') {
+      blocks.push(
+        `[ATTACHMENT ${att.name} — imported into the workspace]\n${att.statusDetail || ''}\nThe files are available through the project context above and the file access tools.`
+      );
+      continue;
+    }
+
+    if (att.content) {
+      const header = `[ATTACHMENT ${att.name}${att.lineCount ? ` — ${att.lineCount} lines` : ''}]`;
+      blocks.push(`${header}\n\`\`\`${att.language || ''}\n${att.content}\n\`\`\``);
+    }
+  }
+
+  return blocks.join('\n\n');
 }

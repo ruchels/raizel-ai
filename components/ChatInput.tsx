@@ -1,306 +1,314 @@
 'use client';
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowUp,
-  Square,
+  Loader2,
   Paperclip,
+  Square,
   X,
-  FileCode,
-  FileArchive,
-  Image as ImageIcon,
   FileText,
-  Eye,
+  Image as ImageIcon,
+  Package,
+  FileWarning,
 } from 'lucide-react';
-import { FileAttachment } from '@/types/chat';
-import {
-  processUploadedFile,
-  createPastedSnippetAttachment,
-  formatFileSize,
-} from '@/lib/files';
+import type { FileAttachment } from '@/types/chat';
+import { processUploadedFile, createPastedSnippetAttachment, formatFileSize } from '@/lib/files';
+import { ACCEPTED_UPLOAD_TYPES } from '@/lib/fs/fileTypes';
+import { IconButton, cx } from './ui/primitives';
 
 interface ChatInputProps {
-  input: string;
-  setInput: (value: string) => void;
-  onSubmit: (attachments: FileAttachment[]) => void;
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (attachments: FileAttachment[], archives: Map<string, File>) => void;
   isLoading: boolean;
   onStop: () => void;
+  enterToSend: boolean;
   placeholder?: string;
-  enterToSend?: boolean;
 }
 
+interface PendingUpload {
+  id: string;
+  name: string;
+  size: number;
+}
+
+/** Text this long is moved out of the composer into an attachment chip. */
+const PASTE_THRESHOLD_CHARS = 800;
+const PASTE_THRESHOLD_LINES = 20;
+
 export const ChatInput: React.FC<ChatInputProps> = ({
-  input,
-  setInput,
+  value,
+  onChange,
   onSubmit,
   isLoading,
   onStop,
-  placeholder = 'Ask RAIZEL AI...',
-  enterToSend = true,
+  enterToSend,
+  placeholder = 'Message RAIZEL',
 }) => {
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const [previewAttachment, setPreviewAttachment] = useState<FileAttachment | null>(null);
+  const [pending, setPending] = useState<PendingUpload[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
+  /**
+   * Archives are kept here rather than on the attachment so the raw File
+   * survives until submit; FileAttachment must stay JSON-serialisable.
+   */
+  const archivesRef = useRef<Map<string, File>>(new Map());
 
-  // Auto-resize textarea according to scrollHeight
+  // Grow with content up to a ceiling, then scroll internally.
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(
-        textareaRef.current.scrollHeight,
-        200
-      )}px`;
-    }
-  }, [input]);
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+  }, [value]);
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (enterToSend && e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      if (!isLoading && (input.trim() || attachments.length > 0)) {
-        handleSend();
-      }
-    }
-  };
+  const canSend = !isLoading && (value.trim().length > 0 || attachments.length > 0);
 
-  const handleSend = () => {
-    if (isLoading || (!input.trim() && attachments.length === 0)) return;
-    const currentAttachments = [...attachments];
+  const send = useCallback(() => {
+    if (!canSend) return;
+    const current = attachments;
+    const archives = new Map(archivesRef.current);
     setAttachments([]);
-    onSubmit(currentAttachments);
-  };
+    archivesRef.current = new Map();
+    onSubmit(current, archives);
+  }, [canSend, attachments, onSubmit]);
 
-  // Claude-Style Paste Interception for Large Text
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const pasted = e.clipboardData.getData('text');
-    if (!pasted) return;
+  const handleFiles = useCallback(async (fileList: FileList | null) => {
+    if (!fileList?.length) return;
 
-    const lineCount = pasted.split('\n').length;
-    // If text has >= 800 chars or >= 20 lines, compress into a file attachment
-    if (pasted.length >= 800 || lineCount >= 20) {
-      e.preventDefault();
-      const snippet = createPastedSnippetAttachment(pasted);
-      setAttachments((prev) => [...prev, snippet]);
-    }
-  };
+    const files = Array.from(fileList);
+    const placeholders: PendingUpload[] = files.map((file, index) => ({
+      id: `pending_${Date.now()}_${index}`,
+      name: file.name,
+      size: file.size,
+    }));
+    setPending((prev) => [...prev, ...placeholders]);
 
-  // Process selected files from input or drag-drop
-  const handleFilesSelected = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-
-    const filesArray = Array.from(fileList);
-    for (const file of filesArray) {
+    // Sequential: PDF and DOCX parsing is CPU-bound and would jank the tab.
+    for (let i = 0; i < files.length; i++) {
       try {
-        const processed = await processUploadedFile(file);
+        const processed = await processUploadedFile(files[i]);
+        if (processed.type === 'zip' && processed.status !== 'failed') {
+          archivesRef.current.set(processed.id, files[i]);
+        }
         setAttachments((prev) => [...prev, processed]);
-      } catch (err) {
-        console.error('Error processing file:', err);
+      } catch (error) {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: `att_failed_${Date.now()}_${i}`,
+            name: files[i].name,
+            type: 'document',
+            size: files[i].size,
+            mimeType: files[i].type || 'application/octet-stream',
+            status: 'failed',
+            statusDetail: error instanceof Error ? error.message : 'The file could not be processed.',
+          },
+        ]);
+      } finally {
+        setPending((prev) => prev.filter((p) => p.id !== placeholders[i].id));
       }
     }
 
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (event.clipboardData.files.length > 0) {
+      event.preventDefault();
+      void handleFiles(event.clipboardData.files);
+      return;
+    }
+
+    const text = event.clipboardData.getData('text');
+    if (!text) return;
+    if (text.length >= PASTE_THRESHOLD_CHARS || text.split('\n').length >= PASTE_THRESHOLD_LINES) {
+      event.preventDefault();
+      setAttachments((prev) => [...prev, createPastedSnippetAttachment(text)]);
     }
   };
 
-  const removeAttachment = (id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const shouldSend = enterToSend
+      ? event.key === 'Enter' && !event.shiftKey
+      : event.key === 'Enter' && (event.metaKey || event.ctrlKey);
+
+    if (shouldSend) {
+      event.preventDefault();
+      send();
+    }
   };
 
-  const getAttachmentIcon = (att: FileAttachment) => {
-    if (att.type === 'image') return <ImageIcon className="w-3.5 h-3.5 text-indigo-400 shrink-0" />;
-    if (att.type === 'zip') return <FileArchive className="w-3.5 h-3.5 text-amber-400 shrink-0" />;
-    if (att.name.includes('.')) return <FileCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />;
-    return <FileText className="w-3.5 h-3.5 text-sky-400 shrink-0" />;
+  const iconFor = (attachment: FileAttachment) => {
+    if (attachment.status === 'failed') return <FileWarning className="h-3.5 w-3.5 text-[var(--danger)]" />;
+    if (attachment.type === 'image') return <ImageIcon className="h-3.5 w-3.5 text-[var(--text-muted)]" />;
+    if (attachment.type === 'zip') return <Package className="h-3.5 w-3.5 text-[var(--text-muted)]" />;
+    return <FileText className="h-3.5 w-3.5 text-[var(--text-muted)]" />;
   };
 
   return (
-    <div className="w-full max-w-4xl mx-auto px-3 sm:px-4 pb-3 sm:pb-5">
-      {/* Hidden File Input */}
+    <div className="mx-auto w-full max-w-3xl px-3 pb-3 sm:px-4 sm:pb-4">
       <input
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*,.zip,.txt,.js,.ts,.tsx,.jsx,.py,.html,.css,.json,.md,.c,.cpp,.java,.sql,.yaml,.yml"
+        accept={ACCEPTED_UPLOAD_TYPES}
         className="hidden"
-        onChange={(e) => handleFilesSelected(e.target.files)}
+        onChange={(event) => void handleFiles(event.target.files)}
       />
 
       <div
-        onDragOver={(e) => {
-          e.preventDefault();
+        onDragEnter={(event) => {
+          event.preventDefault();
+          dragDepth.current += 1;
           setIsDragging(true);
         }}
-        onDragLeave={(e) => {
-          e.preventDefault();
-          setIsDragging(false);
+        onDragOver={(event) => event.preventDefault()}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          dragDepth.current -= 1;
+          if (dragDepth.current <= 0) setIsDragging(false);
         }}
-        onDrop={(e) => {
-          e.preventDefault();
+        onDrop={(event) => {
+          event.preventDefault();
+          dragDepth.current = 0;
           setIsDragging(false);
-          handleFilesSelected(e.dataTransfer.files);
+          void handleFiles(event.dataTransfer.files);
         }}
-        className={`relative rounded-2xl sm:rounded-3xl bg-[#111420]/90 border shadow-2xl shadow-black/80 backdrop-blur-xl transition-all duration-200 ${
+        className={cx(
+          'rounded-[var(--radius-lg)] border bg-[var(--bg-raised)] shadow-[var(--shadow)] transition-colors',
           isDragging
-            ? 'border-indigo-500 bg-indigo-950/20'
-            : 'border-white/10 focus-within:border-indigo-500/50'
-        }`}
+            ? 'border-[var(--accent)] ring-1 ring-[var(--accent)]'
+            : 'border-[var(--border)] focus-within:border-[var(--border-strong)]'
+        )}
       >
-        {/* Attached Files & Claude-Style Snippets Row */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 p-3 pb-1 border-b border-white/[0.06]">
-            {attachments.map((att) => (
-              <div
-                key={att.id}
-                className="group flex items-center gap-2 pl-2.5 pr-1.5 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.08] border border-white/10 text-xs text-slate-200 transition-all max-w-[240px] sm:max-w-[280px]"
-              >
-                {att.previewUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={att.previewUrl}
-                    alt={att.name}
-                    className="w-5 h-5 rounded object-cover shrink-0"
-                  />
-                ) : (
-                  getAttachmentIcon(att)
-                )}
-
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium text-[11px] sm:text-xs">
-                    {att.name}
-                  </div>
-                  <div className="text-[10px] text-slate-400">
-                    {att.lineCount
-                      ? `${att.lineCount} lines • ${formatFileSize(att.size)}`
-                      : att.extractedFiles
-                      ? `${att.extractedFiles.length} files • ${formatFileSize(att.size)}`
-                      : formatFileSize(att.size)}
-                  </div>
-                </div>
-
-                {/* Inspect button for text/snippets */}
-                {att.content && (
-                  <button
-                    type="button"
-                    onClick={() => setPreviewAttachment(att)}
-                    className="p-1 rounded text-slate-400 hover:text-indigo-300 transition-colors cursor-pointer"
-                    title="View content"
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                  </button>
-                )}
-
-                {/* Remove button */}
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(att.id)}
-                  className="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-rose-400 transition-colors cursor-pointer"
-                  title="Remove file"
+        {(attachments.length > 0 || pending.length > 0) && (
+          <div className="flex flex-wrap gap-1.5 border-b border-[var(--border)] p-2">
+            {attachments.map((attachment) => {
+              const failed = attachment.status === 'failed';
+              return (
+                <div
+                  key={attachment.id}
+                  title={attachment.statusDetail || attachment.name}
+                  className={cx(
+                    'flex max-w-[14rem] items-center gap-2 rounded-[var(--radius)] border py-1 pl-2 pr-1',
+                    failed
+                      ? 'border-[var(--danger)]/40 bg-[var(--danger-subtle)]'
+                      : 'border-[var(--border)] bg-[var(--bg-subtle)]'
+                  )}
                 >
-                  <X className="w-3.5 h-3.5" />
-                </button>
+                  {attachment.previewUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={attachment.previewUrl}
+                      alt=""
+                      className="h-5 w-5 shrink-0 rounded-[var(--radius-sm)] object-cover"
+                    />
+                  ) : (
+                    iconFor(attachment)
+                  )}
+                  <span className="min-w-0">
+                    <span className="block truncate text-[12px] text-[var(--text)]">{attachment.name}</span>
+                    <span
+                      className={cx(
+                        'block text-[11px] tabular',
+                        failed ? 'text-[var(--danger)]' : 'text-[var(--text-muted)]'
+                      )}
+                    >
+                      {failed
+                        ? 'could not be read'
+                        : attachment.type === 'zip'
+                          ? `${attachment.readableCount ?? 0}/${attachment.fileCount ?? 0} readable`
+                          : attachment.lineCount
+                            ? `${attachment.lineCount} lines`
+                            : formatFileSize(attachment.size)}
+                    </span>
+                  </span>
+                  <IconButton
+                    label={`Remove ${attachment.name}`}
+                    size="sm"
+                    onClick={() => {
+                      archivesRef.current.delete(attachment.id);
+                      setAttachments((prev) => prev.filter((a) => a.id !== attachment.id));
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                  </IconButton>
+                </div>
+              );
+            })}
+
+            {pending.map((item) => (
+              <div
+                key={item.id}
+                className="flex max-w-[14rem] items-center gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-subtle)] px-2 py-1.5"
+              >
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--text-muted)]" />
+                <span className="min-w-0">
+                  <span className="block truncate text-[12px] text-[var(--text)]">{item.name}</span>
+                  <span className="block text-[11px] tabular text-[var(--text-muted)]">
+                    reading {formatFileSize(item.size)}…
+                  </span>
+                </span>
               </div>
             ))}
           </div>
         )}
 
-        {/* Text Area */}
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={
-            attachments.length > 0
-              ? 'Add instructions for the attached file(s)...'
-              : placeholder
-          }
-          className="w-full resize-none bg-transparent pt-3.5 pb-12 pl-12 pr-14 text-sm sm:text-base text-slate-100 placeholder:text-slate-500 focus:outline-none max-h-48 leading-relaxed"
-          style={{ minHeight: '52px' }}
-        />
-
-        {/* Attachment (Paperclip) Button */}
-        <div className="absolute left-2.5 bottom-2.5 flex items-center">
-          <button
-            type="button"
+        <div className="flex items-end gap-1.5 p-2">
+          <IconButton
+            label="Attach files"
             disabled={isLoading}
             onClick={() => fileInputRef.current?.click()}
-            className="p-2 rounded-xl bg-white/[0.04] hover:bg-white/[0.09] text-slate-400 hover:text-indigo-300 disabled:opacity-40 transition-all cursor-pointer group"
-            title="Attach images, .zip, or code documents"
+            className="mb-0.5"
           >
-            <Paperclip className="w-4 h-4 group-hover:rotate-45 transition-transform" />
-          </button>
-        </div>
+            <Paperclip className="h-4 w-4" />
+          </IconButton>
 
-        {/* Send / Stop Buttons */}
-        <div className="absolute right-2.5 bottom-2.5 flex items-center gap-2">
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            placeholder={attachments.length > 0 ? 'Add instructions (optional)' : placeholder}
+            className="max-h-[220px] min-h-[36px] flex-1 resize-none self-center bg-transparent py-2 text-[15px] leading-relaxed text-[var(--text)] outline-none placeholder:text-[var(--text-muted)]"
+          />
+
           {isLoading ? (
             <button
               type="button"
               onClick={onStop}
-              className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-all duration-150 cursor-pointer flex items-center justify-center group"
-              title="Stop generation"
+              aria-label="Stop generating"
+              title="Stop generating"
+              className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius)] bg-[var(--fill-active)] text-[var(--text)] transition-colors hover:bg-[var(--fill-hover)]"
             >
-              <Square className="w-4 h-4 text-rose-400 fill-rose-400 group-hover:scale-95 transition-transform" />
+              <Square className="h-3 w-3 fill-current" />
             </button>
           ) : (
             <button
               type="button"
-              onClick={handleSend}
-              disabled={!input.trim() && attachments.length === 0}
-              className="p-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-30 disabled:hover:bg-indigo-600 text-white transition-all duration-150 cursor-pointer disabled:cursor-not-allowed flex items-center justify-center shadow-md shadow-indigo-600/30"
+              onClick={send}
+              disabled={!canSend}
+              aria-label="Send message"
               title="Send message"
+              className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius)] bg-[var(--accent)] text-[var(--accent-fg)] transition-colors hover:bg-[var(--accent-hover)] disabled:bg-[var(--fill-active)] disabled:text-[var(--text-muted)]"
             >
-              <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+              <ArrowUp className="h-4 w-4" />
             </button>
           )}
         </div>
-
-        <div className="absolute left-12 bottom-2 text-[10px] text-slate-400 select-none hidden sm:block">
-          Use <kbd className="px-1 py-0.5 rounded bg-white/5 font-mono text-[9px] text-slate-300">Shift + Enter</kbd> for newline &bull; Paste large code to auto-compress
-        </div>
       </div>
 
-      <div className="text-center mt-2">
-        <p className="text-[11px] text-slate-400 tracking-wide">
-          RAIZEL AI &bull; Powered by Ruchel Afwa Mabrur
-        </p>
-      </div>
-
-      {/* Snippet / File Preview Modal */}
-      {previewAttachment && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-150">
-          <div className="relative w-full max-w-2xl max-h-[80vh] rounded-3xl bg-[#0e121d] border border-white/10 shadow-2xl shadow-black/90 p-5 flex flex-col text-slate-200">
-            <div className="flex items-center justify-between pb-3 border-b border-white/[0.08] mb-3">
-              <div className="flex items-center gap-2">
-                {getAttachmentIcon(previewAttachment)}
-                <span className="font-semibold text-white text-sm">
-                  {previewAttachment.name}
-                </span>
-                <span className="text-[10px] text-slate-400 px-2 py-0.5 rounded bg-white/5">
-                  {previewAttachment.lineCount
-                    ? `${previewAttachment.lineCount} lines`
-                    : formatFileSize(previewAttachment.size)}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setPreviewAttachment(null)}
-                className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="flex-1 overflow-auto rounded-xl bg-[#08090d] border border-white/[0.06] p-4 text-xs font-mono text-slate-300 leading-relaxed whitespace-pre">
-              {previewAttachment.content || '(No preview content available)'}
-            </div>
-          </div>
-        </div>
-      )}
+      <p className="mt-2 text-center text-[11px] text-[var(--text-muted)]">
+        {enterToSend ? 'Shift + Enter for a new line' : 'Ctrl + Enter to send'}
+      </p>
     </div>
   );
 };

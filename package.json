@@ -6,13 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "verify": "tsx scripts/verify.ts",
+    "check": "npm run typecheck && npm run lint && npm run verify"
   },
   "dependencies": {
     "jszip": "^3.10.2",
     "lucide-react": "^1.46.0",
     "next": "16.3.5",
     "openai": "^7.15.0",
+    "pdfjs-dist": "^6.3.289",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "^10.1.0",
@@ -21,13 +25,13 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/jszip": "^3.4.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.5",
     "tailwindcss": "^4",
+    "tsx": "^4.23.13",
     "typescript": "^5"
   }
 }

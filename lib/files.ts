@@ -1,275 +1,360 @@
 import JSZip from 'jszip';
-import { FileAttachment } from '@/types/chat';
-import { ArtifactProject, ArtifactFile } from '@/types/artifact';
+import type { FileAttachment } from '@/types/chat';
+import type { ArtifactFile, ArtifactProject } from '@/types/artifact';
+import type { ProjectIndex } from '@/types/project';
 import { normalizeRelativePath, isSafeExportPath } from '@/lib/zip';
-import { inferLanguageFromPath } from '@/lib/artifact';
+import { extractTextFromBuffer, readFileAsDataURL } from '@/lib/fs/extract';
+import { buildProjectIndex, type RawProjectFile } from '@/lib/project/indexer';
+import {
+  countLines,
+  formatBytes,
+  getExtension,
+  inferLanguage,
+  isArchivePath,
+  isImagePath,
+  isTextLike,
+  MAX_PROJECT_TEXT_BYTES,
+} from '@/lib/fs/fileTypes';
+
+export { formatBytes as formatFileSize } from '@/lib/fs/fileTypes';
+export { readFileAsDataURL } from '@/lib/fs/extract';
 
 /**
- * Checks if a file is an image based on mimeType or extension
+ * Attachment pipeline:
+ *   upload -> detect type -> extract real text -> normalize -> report status
+ *
+ * When extraction fails the attachment records why. Nothing downstream is ever
+ * allowed to claim a file was read when it was not.
  */
+
 export function isImageFile(file: File | { name: string; type?: string }): boolean {
-  if (file.type && file.type.startsWith('image/')) return true;
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  return ['jpg', 'jpeg', 'png', 'webp', 'gif', 'svg', 'bmp'].includes(ext || '');
+  if (file.type?.startsWith('image/')) return true;
+  return isImagePath(file.name);
 }
 
-/**
- * Checks if a file is a zip archive
- */
 export function isZipFile(file: File | { name: string; type?: string }): boolean {
   if (file.type === 'application/zip' || file.type === 'application/x-zip-compressed') return true;
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  return ext === 'zip';
+  return isArchivePath(file.name);
 }
 
-/**
- * Checks if a file is a readable code or text document
- */
-export function isTextFile(file: File | { name: string; type?: string }): boolean {
-  if (file.type && (file.type.startsWith('text/') || file.type.includes('json') || file.type.includes('javascript'))) {
-    return true;
-  }
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  const textExtensions = [
-    'txt', 'md', 'js', 'jsx', 'ts', 'tsx', 'py', 'json', 'html', 'css',
-    'scss', 'c', 'cpp', 'h', 'hpp', 'java', 'go', 'rs', 'php', 'rb',
-    'sh', 'bash', 'zsh', 'yaml', 'yml', 'xml', 'sql', 'env', 'prisma', 'graphql'
-  ];
-  return textExtensions.includes(ext || '');
+function newId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/**
- * Converts a File or Blob into base64 Data URL
- */
-export function readFileAsDataURL(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
+/** Hard ceiling on a single upload so the browser tab stays responsive. */
+export const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 
-/**
- * Converts a File into text content
- */
-export function readFileAsText(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsText(file);
-  });
-}
-
-/**
- * Processes any uploaded file into a FileAttachment object
- */
 export async function processUploadedFile(file: File): Promise<FileAttachment> {
-  const id = `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const id = newId('att');
 
-  // 1. Handle Images
-  if (isImageFile(file)) {
-    const dataUrl = await readFileAsDataURL(file);
-    return {
-      id,
-      name: file.name,
-      type: 'image',
-      size: file.size,
-      mimeType: file.type || 'image/png',
-      content: dataUrl,
-      previewUrl: dataUrl,
-    };
-  }
-
-  // 2. Handle Zip Archives
-  if (isZipFile(file)) {
-    try {
-      const zip = await JSZip.loadAsync(file);
-      const fileNames: string[] = [];
-      const extractedSnippets: string[] = [];
-      let totalExtractedSize = 0;
-      const MAX_TOTAL_SIZE = 2 * 1024 * 1024; // 2 MB limit for extracted text inside prompt
-
-      // Read files in zip
-      const entries = Object.keys(zip.files);
-      for (const relativePath of entries) {
-        const zipEntry = zip.files[relativePath];
-        if (!zipEntry.dir) {
-          fileNames.push(relativePath);
-          // If it's a readable code/text file, extract content
-          const isText = isTextFile({ name: relativePath });
-          if (isText && totalExtractedSize < MAX_TOTAL_SIZE) {
-            try {
-              const textContent = await zipEntry.async('string');
-              if (textContent.length > 0 && totalExtractedSize + textContent.length <= MAX_TOTAL_SIZE) {
-                totalExtractedSize += textContent.length;
-                extractedSnippets.push(
-                  `--- File: ${relativePath} (${textContent.split('\n').length} lines) ---\n${textContent.slice(0, 80000)}`
-                );
-              }
-            } catch {
-              // ignore non-text binary in zip
-            }
-          }
-        }
-      }
-
-      const summaryText = `[ZIP Archive: ${file.name}]\n` +
-        `Total files: ${fileNames.length}\n\n` +
-        `Directory Listing:\n` +
-        fileNames.slice(0, 50).map((f) => ` - ${f}`).join('\n') +
-        (fileNames.length > 50 ? `\n ...and ${fileNames.length - 50} more files\n` : '\n\n') +
-        `Extracted Code/Text Content:\n` +
-        (extractedSnippets.length > 0
-          ? extractedSnippets.join('\n\n')
-          : '(No plain text or code files extracted)');
-
-      return {
-        id,
-        name: file.name,
-        type: 'zip',
-        size: file.size,
-        mimeType: 'application/zip',
-        content: summaryText,
-        extractedFiles: fileNames,
-      };
-    } catch (e) {
-      console.error('Failed to parse zip file', e);
-      return {
-        id,
-        name: file.name,
-        type: 'zip',
-        size: file.size,
-        mimeType: 'application/zip',
-        content: `[ZIP Archive: ${file.name}] (Unable to decompress archive contents)`,
-      };
-    }
-  }
-
-  // 3. Handle Text / Code / Document Files
-  try {
-    const text = await readFileAsText(file);
-    const lineCount = text.split('\n').length;
-    return {
-      id,
-      name: file.name,
-      type: 'text',
-      size: file.size,
-      mimeType: file.type || 'text/plain',
-      content: text,
-      lineCount,
-    };
-  } catch {
+  if (file.size > MAX_UPLOAD_BYTES) {
     return {
       id,
       name: file.name,
       type: 'document',
       size: file.size,
       mimeType: file.type || 'application/octet-stream',
-      content: `[File Attachment: ${file.name} (${file.size} bytes)]`,
+      status: 'failed',
+      statusDetail: `File is ${formatBytes(file.size)}; the upload limit is ${formatBytes(MAX_UPLOAD_BYTES)}.`,
     };
   }
-}
 
-/**
- * Creates an auto-collapsed snippet attachment when long text is pasted (like Claude AI)
- */
-export function createPastedSnippetAttachment(pastedText: string): FileAttachment {
-  const id = `paste_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const lines = pastedText.split('\n');
-  const lineCount = lines.length;
-
-  // Infer filename or extension
-  let extension = 'txt';
-  const trimmed = pastedText.trim();
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    extension = 'json';
-  } else if (trimmed.includes('import React') || trimmed.includes('export default') || trimmed.includes('className=')) {
-    extension = 'tsx';
-  } else if (trimmed.includes('def ') || (trimmed.includes('import ') && trimmed.includes(':'))) {
-    extension = 'py';
-  } else if (trimmed.includes('function ') || trimmed.includes('const ') || trimmed.includes('let ')) {
-    extension = 'js';
-  } else if (trimmed.startsWith('#include') || trimmed.includes('int main(')) {
-    extension = 'c';
-  } else if (trimmed.startsWith('<html') || trimmed.startsWith('<!DOCTYPE')) {
-    extension = 'html';
+  /* --- images: sent to the model as-is for vision --- */
+  if (isImageFile(file)) {
+    try {
+      const dataUrl = await readFileAsDataURL(file);
+      return {
+        id,
+        name: file.name,
+        type: 'image',
+        size: file.size,
+        mimeType: file.type || 'image/png',
+        content: dataUrl,
+        previewUrl: dataUrl,
+        status: 'ready',
+      };
+    } catch {
+      return {
+        id,
+        name: file.name,
+        type: 'image',
+        size: file.size,
+        mimeType: file.type || 'image/png',
+        status: 'failed',
+        statusDetail: 'The image could not be decoded by the browser.',
+      };
+    }
   }
 
-  const name = `pasted_content.${extension}`;
+  /* --- archives: indexed into a project, not dumped as text --- */
+  if (isZipFile(file)) {
+    try {
+      const summary = await summarizeZip(file);
+      return {
+        id,
+        name: file.name,
+        type: 'zip',
+        size: file.size,
+        mimeType: 'application/zip',
+        status: summary.readable > 0 ? 'ready' : 'partial',
+        statusDetail:
+          summary.readable > 0
+            ? `${summary.total} entries — ${summary.readable} readable, ${summary.skipped} binary or skipped.`
+            : 'No readable text files were found in this archive.',
+        extractedFiles: summary.paths,
+        fileCount: summary.total,
+        readableCount: summary.readable,
+      };
+    } catch (err) {
+      return {
+        id,
+        name: file.name,
+        type: 'zip',
+        size: file.size,
+        mimeType: 'application/zip',
+        status: 'failed',
+        statusDetail: `The archive could not be opened: ${err instanceof Error ? err.message : 'unknown error'}`,
+      };
+    }
+  }
+
+  /* --- everything else: real text extraction --- */
+  const buffer = await file.arrayBuffer();
+  const result = await extractTextFromBuffer(file.name, buffer);
+
+  if (!result.ok) {
+    return {
+      id,
+      name: file.name,
+      type: 'document',
+      size: file.size,
+      mimeType: file.type || 'application/octet-stream',
+      status: 'failed',
+      statusDetail: result.detail || `Could not read this file (${result.reason}).`,
+    };
+  }
 
   return {
     id,
+    name: file.name,
+    type: 'text',
+    size: file.size,
+    mimeType: file.type || 'text/plain',
+    content: result.text,
+    lineCount: countLines(result.text),
+    language: inferLanguage(file.name),
+    status: 'ready',
+    statusDetail: result.converted
+      ? `Converted from ${getExtension(file.name).toUpperCase()} to text (${countLines(result.text)} lines).`
+      : undefined,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* ZIP handling                                                        */
+/* ------------------------------------------------------------------ */
+
+interface ZipSummary {
+  paths: string[];
+  total: number;
+  readable: number;
+  skipped: number;
+}
+
+async function summarizeZip(file: File): Promise<ZipSummary> {
+  const zip = await JSZip.loadAsync(file);
+  const paths: string[] = [];
+  let readable = 0;
+  let skipped = 0;
+
+  for (const [rawPath, entry] of Object.entries(zip.files)) {
+    if (entry.dir) continue;
+    const normalized = normalizeRelativePath(rawPath);
+    if (!normalized || !isSafeExportPath(normalized)) {
+      skipped++;
+      continue;
+    }
+    paths.push(normalized);
+    if (isTextLike(normalized)) readable++;
+    else skipped++;
+  }
+
+  return { paths, total: paths.length, readable, skipped };
+}
+
+export interface ZipImportProgress {
+  processed: number;
+  total: number;
+  currentPath: string;
+}
+
+export interface ZipImportResult {
+  project: ArtifactProject;
+  index: ProjectIndex;
+  skipped: Array<{ path: string; reason: string }>;
+}
+
+/**
+ * Extracts an uploaded ZIP into a real project: every text file is decoded and
+ * stored with its actual content, then indexed. Path traversal and secret
+ * files are rejected before anything is read.
+ */
+export async function importProjectFromZip(
+  file: File,
+  conversationId: string,
+  onProgress?: (progress: ZipImportProgress) => void
+): Promise<ZipImportResult | null> {
+  const zip = await JSZip.loadAsync(file);
+
+  const entries = Object.entries(zip.files).filter(([, entry]) => !entry.dir);
+  const skipped: Array<{ path: string; reason: string }> = [];
+  const raw: RawProjectFile[] = [];
+
+  let totalTextBytes = 0;
+  let processed = 0;
+
+  // Archives often wrap everything in a single top-level folder; strip it so
+  // paths look like the real project ("app/page.tsx", not "repo-main/app/page.tsx").
+  const normalizedPaths = entries.map(([path]) => normalizeRelativePath(path)).filter(Boolean);
+  const commonRoot = findCommonRoot(normalizedPaths);
+
+  for (const [rawPath, entry] of entries) {
+    processed++;
+    let path = normalizeRelativePath(rawPath);
+    if (commonRoot && path.startsWith(`${commonRoot}/`)) path = path.slice(commonRoot.length + 1);
+
+    if (!path) continue;
+    onProgress?.({ processed, total: entries.length, currentPath: path });
+
+    if (!isSafeExportPath(path)) {
+      skipped.push({ path, reason: 'unsafe path or on the credential blocklist' });
+      continue;
+    }
+
+    let buffer: ArrayBuffer;
+    try {
+      buffer = await entry.async('arraybuffer');
+    } catch {
+      skipped.push({ path, reason: 'could not be decompressed' });
+      continue;
+    }
+
+    if (totalTextBytes > MAX_PROJECT_TEXT_BYTES) {
+      skipped.push({ path, reason: 'project text budget exceeded' });
+      raw.push({
+        path,
+        content: null,
+        bytes: buffer.byteLength,
+        unreadableReason: 'too_large',
+        unreadableDetail: 'Skipped: the project text budget was already exhausted.',
+      });
+      continue;
+    }
+
+    const extraction = await extractTextFromBuffer(path, buffer);
+    if (extraction.ok) {
+      totalTextBytes += extraction.text.length;
+      raw.push({ path, content: extraction.text, bytes: buffer.byteLength });
+    } else {
+      raw.push({
+        path,
+        content: null,
+        bytes: buffer.byteLength,
+        unreadableReason: extraction.reason,
+        unreadableDetail: extraction.detail,
+      });
+    }
+  }
+
+  if (raw.length === 0) return null;
+
+  const projectName = (commonRoot || file.name.replace(/\.zip$/i, '') || 'imported-project').trim();
+  const index = buildProjectIndex(raw, projectName);
+  index.manifest.excludedPaths = skipped.map((s) => s.path);
+
+  const files: ArtifactFile[] = index.files.map((f) => ({
+    path: f.path,
+    name: f.name,
+    content: f.content ?? '',
+    language: f.language,
+    updatedAt: Date.now(),
+    isReadable: f.content !== null,
+    unreadableReason: f.unreadableDetail,
+  }));
+
+  const firstInteresting =
+    index.manifest.entryPoints[0] ||
+    index.manifest.documentation[0] ||
+    index.files.find((f) => f.content !== null)?.path ||
+    files[0]?.path ||
+    '';
+
+  const now = Date.now();
+  const project: ArtifactProject = {
+    id: newId('art'),
+    conversationId,
+    name: index.manifest.name,
+    title: index.manifest.name,
+    description: `Imported from ${file.name}`,
+    files,
+    activeFilePath: firstInteresting,
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+    origin: 'imported',
+    manifest: index.manifest,
+  };
+
+  return { project, index, skipped };
+}
+
+function findCommonRoot(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  const firstSegments = paths.map((p) => p.split('/')[0]);
+  const root = firstSegments[0];
+  if (!root || firstSegments.some((s) => s !== root)) return null;
+  // Only strip if it really is a wrapper directory (every path is nested).
+  if (paths.some((p) => !p.includes('/'))) return null;
+  return root;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pasted snippets                                                     */
+/* ------------------------------------------------------------------ */
+
+const SNIPPET_SIGNATURES: Array<[RegExp, string]> = [
+  [/^\s*[[{][\s\S]*[\]}]\s*$/, 'json'],
+  [/^\s*<\?php/, 'php'],
+  [/^\s*<!DOCTYPE|^\s*<html/i, 'html'],
+  [/\b(?:import\s+React|export\s+default|className=|useState\()/, 'tsx'],
+  [/\b(?:interface\s+\w+\s*\{|:\s*(?:string|number|boolean)\b|export\s+type\s)/, 'ts'],
+  [/^\s*(?:def|class)\s+\w+|^\s*from\s+\w+\s+import/m, 'py'],
+  [/^\s*#include\b|\bint\s+main\s*\(/, 'c'],
+  [/^\s*(?:package|func)\s+\w+/m, 'go'],
+  [/\b(?:SELECT|INSERT INTO|CREATE TABLE)\b/i, 'sql'],
+  [/^\s*(?:function|const|let|var)\s+\w+/m, 'js'],
+  [/^\s*#{1,6}\s+\S|^\s*[-*]\s+\S/m, 'md'],
+];
+
+export function createPastedSnippetAttachment(pastedText: string): FileAttachment {
+  let extension = 'txt';
+  for (const [pattern, ext] of SNIPPET_SIGNATURES) {
+    if (pattern.test(pastedText)) {
+      extension = ext;
+      break;
+    }
+  }
+
+  const name = `pasted_snippet.${extension}`;
+  return {
+    id: newId('paste'),
     name,
     type: 'text',
     size: new Blob([pastedText]).size,
     mimeType: 'text/plain',
     content: pastedText,
-    lineCount,
+    lineCount: countLines(pastedText),
+    language: inferLanguage(name),
+    status: 'ready',
   };
 }
-
-/**
- * Formats size into human-readable string (KB, MB)
- */
-export function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/**
- * Extracts a complete ArtifactProject from an uploaded ZIP file
- */
-export async function extractArtifactFromZip(
-  file: File,
-  conversationId: string
-): Promise<ArtifactProject | null> {
-  try {
-    const zip = await JSZip.loadAsync(file);
-    const files: ArtifactFile[] = [];
-    const entries = Object.keys(zip.files);
-    const projectName = file.name.replace(/\.zip$/i, '') || 'uploaded-project';
-
-    for (const relativePath of entries) {
-      const entry = zip.files[relativePath];
-      if (!entry.dir) {
-        const normalized = normalizeRelativePath(relativePath);
-        if (!isSafeExportPath(normalized)) continue;
-
-        try {
-          const content = await entry.async('string');
-          files.push({
-            path: normalized,
-            name: normalized.split('/').pop() || normalized,
-            content,
-            language: inferLanguageFromPath(normalized),
-            updatedAt: Date.now(),
-          });
-        } catch {
-          // Binary or unsupported encoding - ignore safely
-        }
-      }
-    }
-
-    if (files.length === 0) return null;
-
-    return {
-      id: `art_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      conversationId,
-      name: projectName,
-      title: projectName,
-      description: `Imported from ${file.name} (${files.length} files)`,
-      files,
-      activeFilePath: files[0]?.path || '',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      version: 1,
-    };
-  } catch (err) {
-    console.error('Failed to extract project artifact from zip', err);
-    return null;
-  }
-}
-
